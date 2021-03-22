@@ -397,9 +397,10 @@ class FPGAIm2ColConv(ONNXForward):
                                            len(node.dilations) != image_dims):
             return False
 
-        if node.pads is not None and (not all(p == 0 for p in node.pads)
-                                      or len(node.pads) != image_dims * 2):
-            return False
+        print(f"---> ATTENTION: skip padding check on Convolution")
+        # if node.pads is not None and (not all(p == 0 for p in node.pads)
+        #                               or len(node.pads) != image_dims * 2):
+        #     return False
 
         if node.strides is not None and len(node.strides) != image_dims:
             return False
@@ -445,7 +446,10 @@ class FPGAIm2ColConv(ONNXForward):
         batch_size = X.shape[0]
 
         # Take output size: note, tat this accounts for vectorization (if present)
+        input_size_x, input_size_y = X.shape[2:]
         output_size_x, output_size_y = Y.shape[2:]
+        padding = node.pads[0] # assume all same padding
+
         new_sdfg = dace.SDFG("fpga_im2col_conv")
 
         # setup inputs and outputs
@@ -559,12 +563,21 @@ class FPGAIm2ColConv(ONNXForward):
             X = state.add_read("X")
             pipe = state.add_write("im2col_pipe")
             vect_data = state.add_access("vec_data_im2col")
+
             tasklet = state.add_tasklet("read_X", {"from_memory"},
                                         {"to_kernel"},
-                                        "to_kernel = from_memory")
+                                        """
+if (x + hx - {padding} < {output_size_x} && x + hx  - {padding} >= 0 && 
+y0*{vec_width}+y1 + hy  - {padding} < {output_size_y} && y0*{vec_width}+y1 + hy  - {padding} >= 0) {{
+    printf("Access: (%d+%d=%d, %d+%d=%d, %d)\\n", x, hx, x+hx, y0+y1, hy, y0+y1+hy, ((((((((16 * b) + (16 * cin)) + (4 * hx)) + hy) + (4 * x)) + y0) + y1) - 5));
+    to_kernel = *from_memory;
+}} else {{
+    to_kernel = 0;
+}}
+""".format(padding=padding, output_size_x=output_size_x, output_size_y=output_size_y, vec_width=vec_width), language=dace.dtypes.Language.CPP)
 
             im2col_input_memlet = dace.Memlet(
-                "X[b, cin, x + hx, y0*{}+y1 + hy]".format(vec_width))
+                "X[b, cin, x + hx - {}, y0*{}+y1 + hy - {}]".format(padding, vec_width, padding), allow_oob=True, dynamic=True)
 
             # In the innermost map we read W=vec_width data elements and we store them into `vec_data`
             state.add_memlet_path(X,
@@ -1825,7 +1838,7 @@ else:
 
         new_sdfg.fill_scope_connectors()
         # Specialize the new sdfg, by using the input shapes
-        new_sdfg.save("/tmp/gemm.sdfg")
+        # new_sdfg.save("/tmp/gemm.sdfg")
         new_sdfg.validate()
         return new_sdfg
 
@@ -2828,3 +2841,94 @@ class FPGAReduceSum(ONNXForward):
 # =============================
 # New implementations: burgerm
 # =============================
+# TODO: implement
+@autoregister_params(op="AveragePool", name="fpga")
+class FPGAAveragePool2D(ONNXForward):
+    @staticmethod
+    def forward_can_be_applied(node: ONNXOp, state: SDFGState,
+                               sdfg: SDFG) -> bool:
+        
+        # TODO: provide checks
+
+        return True
+
+    @staticmethod
+    def forward(node: ONNXOp, state: SDFGState,
+                sdfg: SDFG) -> typing.Union[Node, SDFG]:
+
+        # TODO: provide implementation
+        print(f"---> ATTENTION: dummy implementation for node {FPGAAveragePool2D}")
+
+        # Get inputs and outputs names
+        X = in_desc_with_name(node, state, sdfg, "X")
+        Y = out_desc_with_name(node, state, sdfg, "Y")
+
+        # Create inner SDFG
+        op_sdfg = dace.SDFG(node.name + "_dummy")
+        compute_state = op_sdfg.add_state("dummy_state")
+
+        x_inner = X.clone()
+        x_inner.transient = False
+        y_inner = Y.clone()
+        y_inner.transient = False
+
+        op_sdfg.add_datadesc("X", x_inner)
+        op_sdfg.add_datadesc("Y", y_inner)
+
+        x_in = compute_state.add_read("X")
+        y_out = compute_state.add_write("Y")
+
+        compute_state.add_memlet_path(
+            x_in,
+            y_out,
+            memlet=dace.Memlet(f"X[0]")
+        )
+
+        return op_sdfg
+
+
+# TODO: implement
+@autoregister_params(op="Flatten", name="fpga")
+class FPGAFlatten(ONNXForward):
+    @staticmethod
+    def forward_can_be_applied(node: ONNXOp, state: SDFGState,
+                               sdfg: SDFG) -> bool:
+        
+        # TODO: provide checks
+
+        return True
+
+    @staticmethod
+    def forward(node: ONNXOp, state: SDFGState,
+                sdfg: SDFG) -> typing.Union[Node, SDFG]:
+
+        # TODO: provide implementation
+        print(f"---> ATTENTION: dummy implementation for node {FPGAFlatten}")
+
+
+        # Get inputs and outputs names
+        input = in_desc_with_name(node, state, sdfg, "input")
+        output = out_desc_with_name(node, state, sdfg, "output")
+
+        # Create inner SDFG
+        op_sdfg = dace.SDFG(node.name + "_dummy")
+        compute_state = op_sdfg.add_state("dummy_state")
+
+        input_inner = input.clone()
+        input_inner.transient = False
+        output_inner = output.clone()
+        output_inner.transient = False
+
+        op_sdfg.add_datadesc("input", input_inner)
+        op_sdfg.add_datadesc("output", output_inner)
+
+        input_in = compute_state.add_read("input")
+        output_out = compute_state.add_write("output")
+
+        compute_state.add_memlet_path(
+            input_in,
+            output_out,
+            memlet=dace.Memlet(f"input[0]")
+        )
+
+        return op_sdfg
