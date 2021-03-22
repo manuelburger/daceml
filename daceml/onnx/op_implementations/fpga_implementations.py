@@ -2821,3 +2821,10 @@ class FPGAReduceSum(ONNXForward):
         new_sdfg.validate()
         new_sdfg.save('/tmp/reduce_sum.sdfg')
         return new_sdfg
+
+
+
+
+# =============================
+# New implementations: burgerm
+# =============================
