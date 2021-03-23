@@ -564,20 +564,29 @@ class FPGAIm2ColConv(ONNXForward):
             pipe = state.add_write("im2col_pipe")
             vect_data = state.add_access("vec_data_im2col")
 
+#             tasklet = state.add_tasklet("read_X", {"from_memory"},
+#                                         {"to_kernel"},
+#                                         """
+# if (x + hx - {padding} < {output_size_x} && x + hx  - {padding} >= 0 && 
+# y0*{vec_width}+y1 + hy  - {padding} < {output_size_y} && y0*{vec_width}+y1 + hy  - {padding} >= 0) {{
+#     // printf("Access: (%d+%d=%d, %d+%d=%d, %d)\\n", x, hx, x+hx, y0+y1, hy, y0+y1+hy, ((((((((16 * b) + (16 * cin)) + (4 * hx)) + hy) + (4 * x)) + y0) + y1) - 5));
+#     to_kernel = *from_memory;
+# }} else {{
+#     printf("0 pad\\n");
+#     to_kernel = 0;
+# }}
+# """.format(padding=padding, output_size_x=output_size_x, output_size_y=output_size_y, vec_width=vec_width), language=dace.dtypes.Language.CPP)
+
             tasklet = state.add_tasklet("read_X", {"from_memory"},
                                         {"to_kernel"},
-                                        """
-if (x + hx - {padding} < {output_size_x} && x + hx  - {padding} >= 0 && 
-y0*{vec_width}+y1 + hy  - {padding} < {output_size_y} && y0*{vec_width}+y1 + hy  - {padding} >= 0) {{
-    printf("Access: (%d+%d=%d, %d+%d=%d, %d)\\n", x, hx, x+hx, y0+y1, hy, y0+y1+hy, ((((((((16 * b) + (16 * cin)) + (4 * hx)) + hy) + (4 * x)) + y0) + y1) - 5));
-    to_kernel = *from_memory;
-}} else {{
-    to_kernel = 0;
-}}
-""".format(padding=padding, output_size_x=output_size_x, output_size_y=output_size_y, vec_width=vec_width), language=dace.dtypes.Language.CPP)
+                                        "to_kernel = from_memory")
+
+            # im2col_input_memlet = dace.Memlet(
+            #     "X[b, cin, x + hx - {}, y0*{}+y1 + hy - {}]".format(padding, vec_width, padding), allow_oob=True, dynamic=True)
+
 
             im2col_input_memlet = dace.Memlet(
-                "X[b, cin, x + hx - {}, y0*{}+y1 + hy - {}]".format(padding, vec_width, padding), allow_oob=True, dynamic=True)
+                "X[b, cin, x + hx - {}, y0*{}+y1 + hy - {}]".format(padding, vec_width, padding))
 
             # In the innermost map we read W=vec_width data elements and we store them into `vec_data`
             state.add_memlet_path(X,
