@@ -547,7 +547,7 @@ class FPGAIm2ColConv(ONNXForward):
                     "hx": "0:{}".format(filter_hx),
                     "hy": "0:{}".format(filter_hy),
                     "x": "0:{}".format(output_size_x),
-                    "y0": "0:{}/{}".format(output_size_x,
+                    "y0": "0:{}/{}".format(output_size_y, 
                                            vec_width),
                 },
                 schedule=dace.ScheduleType.FPGA_Device)
@@ -568,6 +568,7 @@ class FPGAIm2ColConv(ONNXForward):
             pipe = state.add_write("im2col_pipe")
             vect_data = state.add_access("vec_data_im2col")
 
+            print("Output X: {}, Output Y: {}, Vector: {}".format(output_size_x, output_size_y, vec_width))
 
 
             tasklet = state.add_tasklet("read_X", {"from_memory"},
@@ -575,12 +576,12 @@ class FPGAIm2ColConv(ONNXForward):
                                         """
 if (x + hx - {padding} < {output_size_x} + {offset} &&
 x + hx  - {padding} >= 0 && 
-y0*{vec_width}+y1 + hy  - {padding} < {output_size_y} + {offset}  &&
+y0*{vec_width}+y1 + hy  - {padding} < {output_size_y} * {vec_width} + {offset}  &&
 y0*{vec_width}+y1 + hy  - {padding} >= 0) {{
     // printf("Access: (%d+%d=%d, %d+%d=%d, %d)\\n", x, hx, x+hx, y0+y1, hy, y0+y1+hy);
     to_kernel = *from_memory;
 }} else {{
-    printf("0 pad, (%d+%d=%d, %d+%d=%d, %d)\\n", x, hx, x+hx, y0+y1, hy, y0+y1+hy);
+    // printf("0 pad, (%d+%d=%d, %d+%d=%d, %d)\\n", x, hx, x+hx, y0+y1, hy, y0+y1+hy);
     to_kernel = 0;
 }}
 """.format(offset=offset, padding=padding, output_size_x=output_size_x, output_size_y=output_size_y, vec_width=vec_width), language=dace.dtypes.Language.CPP)
