@@ -1,7 +1,4 @@
-# Simple test for evaluating 2D convolutions for FPGA
-
-# TODO: conform to pytest syntax if needed
-# TODO: render this a real test
+# Tests for evaluating 2D convolutions for FPGA
 
 from dace.transformation.interstate import FPGATransformSDFG
 
@@ -28,7 +25,8 @@ donnx.ONNXConv.default_implementation = 'im2col'
 
 
 class Model(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, input_to_constant):
+    def __init__(self, in_channels, out_channels, kernel_size,
+                 input_to_constant):
         super(Model, self).__init__()
         self.conv = nn.Conv2d(in_channels=in_channels,
                               out_channels=out_channels,
@@ -83,8 +81,6 @@ def evaluate(in_channels,
     # Transform for FPGA and Inline
     donnx.ONNXConv.default_implementation = "fpga"
     sdfg.apply_transformations([FPGATransformSDFG])
-    sdfg.apply_transformations_repeated([InlineSDFG])
-
 
     ###################################
     sdfg.expand_library_nodes()
@@ -96,14 +92,14 @@ def evaluate(in_channels,
         sdfg.apply_transformations_repeated([InputToConstant],
                                             print_report=True)
 
-    sdfg.save("/tmp/out_fpga.sdfg")
     #################################
     # Execute
+    sdfg.save("/tmp/out_fpga.sdfg")
     dace_output_fpga = dace_model(torch.clone(x))
-    dace_output_fpga = dace_output_fpga.reshape(torch_output.shape)
+    dace_output_fpga = dace_output_fpga.detach().numpy().reshape(torch_output.shape)
 
     diff = np.linalg.norm(torch_output.detach().numpy() -
-                          dace_output_fpga) / dace_output_fpga.size
+                          dace_output_fpga) / np.linalg.norm(torch_output.detach().numpy())
     print("Difference: ", diff)
     if queue is not None:
         # we are testing
@@ -121,7 +117,8 @@ def run(input_to_constant):
     '''
     #evaluate(6, 16, 5, 4, (1000, 6, 12, 12), input_to_constant, False)
     #second conv
-    evaluate(1, 6, 5, 1, (1000, 1, 28, 28), input_to_constant, False)
+    evaluate(1, 6, 5, 1, (100, 1, 28, 28), input_to_constant, False)
+
 
 def test(input_to_constant):
     '''

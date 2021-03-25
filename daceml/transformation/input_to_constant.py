@@ -9,6 +9,7 @@ from dace.transformation import transformation as xf
 from daceml.onnx import ONNXModel
 from daceml.onnx.converters import clean_onnx_name
 
+
 def forward_memlet_tree_with_nested_and_copies(state, edge) -> mm.MemletTree:
     # Obtain the full state (to work with paths that trace beyond a scope)
     state = state._graph
@@ -50,8 +51,11 @@ def forward_memlet_tree_with_nested_and_copies(state, edge) -> mm.MemletTree:
         elif isinstance(treenode.edge.dst, nodes.NestedSDFG):
 
             # todo what about shadowing in nested SDFGS
-            access_nodes = ((n, parent) for n, parent in treenode.edge.dst.sdfg.all_nodes_recursive()
-                            if isinstance(n, nodes.AccessNode) and n.data == treenode.edge.dst_conn)
+            access_nodes = (
+                (n, parent)
+                for n, parent in treenode.edge.dst.sdfg.all_nodes_recursive()
+                if isinstance(n, nodes.AccessNode)
+                and n.data == treenode.edge.dst_conn)
 
             treenode.children = []
             for access_node, parent in access_nodes:
@@ -65,20 +69,26 @@ def forward_memlet_tree_with_nested_and_copies(state, edge) -> mm.MemletTree:
             copied_data_name = treenode.edge.dst.data
 
             # semi-hack: check that the subset is complete
-            if edge.data.subset.num_elements() != sdfg.arrays[edge.data.data].total_size:
+            if edge.data.subset.num_elements() != sdfg.arrays[
+                    edge.data.data].total_size:
                 return
 
             # also check that the copy is never written to (except for here)
-            if any(parent.in_degree(n) > 0 for n, parent in sdfg.all_nodes_recursive()
-                   if isinstance(n, nodes.AccessNode) and n.data == copied_data_name and n is not treenode.edge.dst):
+            if any(
+                    parent.in_degree(n) > 0
+                    for n, parent in sdfg.all_nodes_recursive()
+                    if isinstance(n, nodes.AccessNode) and n.data ==
+                    copied_data_name and n is not treenode.edge.dst):
                 return
 
             if state.in_degree(treenode.edge.dst) != 1:
                 return
 
             # todo what about shadowing in nested SDFGS (should not descend into nested SDFGs)
-            access_nodes = ((n, parent) for n, parent in sdfg.all_nodes_recursive()
-                            if isinstance(n, nodes.AccessNode) and n.data == copied_data_name)
+            access_nodes = ((n, parent)
+                            for n, parent in sdfg.all_nodes_recursive()
+                            if isinstance(n, nodes.AccessNode)
+                            and n.data == copied_data_name)
 
             for access_node, parent in access_nodes:
                 treenode.children.extend(
@@ -106,9 +116,11 @@ def forward_memlet_tree_with_nested_and_copies(state, edge) -> mm.MemletTree:
     # Return node that corresponds to current edge
     return traverse(tree_root)
 
+
 def print_tree(tree):
     return "{} -> {}".format(tree.edge.src, tree.edge.dst) + "".join(
         "\n |\n +- {}".format(print_tree(c)) for c in tree.children)
+
 
 @registry.autoregister_params(singlestate=True)
 @properties.make_properties
@@ -177,7 +189,9 @@ class InputToConstant(xf.Transformation):
         # add the weight as a dace constant
         unclean_onnx_name = {clean_onnx_name(w): w
                              for w in parent.weights}[node.data]
-        sdfg.add_constant(data_name, parent.weights[unclean_onnx_name],
+        from torch import Tensor
+        data = parent.weights[unclean_onnx_name].numpy() if isinstance(parent.weights[unclean_onnx_name], Tensor) else parent.weights[unclean_onnx_name]
+        sdfg.add_constant(data_name, data,
                           sdfg.arrays[node.data])
 
         for out_edge in state.out_edges(node):
@@ -203,8 +217,7 @@ class InputToConstant(xf.Transformation):
                 root_edge.dst_conn = None
 
                 # add the constant access to the top of the tasklet
-                access_str = "{}[{}]".format(data_name,
-                                             root_edge.data.subset)
+                access_str = "{}[{}]".format(data_name, root_edge.data.subset)
                 tasklet.code = properties.CodeBlock(
                     "{} = {}\n".format(conn_name, access_str) +
                     tasklet.code.as_string, tasklet.language)
@@ -218,8 +231,12 @@ class InputToConstant(xf.Transformation):
                     edge.src_conn = None
 
                 if isinstance(edge.dst, nodes.NestedSDFG):
-                    access_nodes = [(n, parent) for n, parent in edge.dst.sdfg.all_nodes_recursive()
-                                    if isinstance(n, nodes.AccessNode) and n.data == edge.dst_conn]
+                    access_nodes = [
+                        (n, parent)
+                        for n, parent in edge.dst.sdfg.all_nodes_recursive()
+                        if isinstance(n, nodes.AccessNode)
+                        and n.data == edge.dst_conn
+                    ]
                     for n, parent_state in access_nodes:
                         parent_state.remove_node(n)
                     del edge.dst.sdfg.arrays[edge.dst_conn]

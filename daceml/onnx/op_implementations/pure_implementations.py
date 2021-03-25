@@ -8,15 +8,16 @@ import dace
 from dace import SDFGState, SDFG, dtypes
 from dace.frontend.python.parser import DaceProgram
 from dace.registry import autoregister_params
+import dace.libraries.blas as blas
 from dace.sdfg.nodes import Node
-from dace.symbolic import symstr
 
+from daceml.transformation import constant_folding
 from daceml.onnx.nodes.onnx_op import ONNXOp
 from daceml.onnx import converters
-from daceml.onnx.implementation_abc import ONNXForward
+from daceml.onnx.forward_implementation_abc import ONNXForward
 import numpy as np
 
-from daceml.util.utils import in_desc_with_name, out_desc_with_name
+from daceml.util.utils import in_desc_with_name, out_desc_with_name, in_edge_with_name
 
 log = logging.getLogger(__name__)
 
@@ -52,9 +53,28 @@ def program_for_node(program, sdfg: SDFG, state: SDFGState,
 
     program.__annotations__ = annotations
 
-    result = DaceProgram(program, (), {})
+    result = DaceProgram(program, (), {}, False, 0)
+    result.name = node.label + "_expansion"
 
     return result
+
+
+@autoregister_params(op="Log", name="pure")
+class PureLog(ONNXForward):
+    @staticmethod
+    def forward_can_be_applied(node: ONNXOp, state: SDFGState,
+                               sdfg: SDFG) -> bool:
+        return in_desc_with_name(node, state, sdfg, 'input').dtype in [
+            dace.float16, dace.float32, dace.float64
+        ]
+
+    @staticmethod
+    def forward(node: ONNXOp, state: SDFGState,
+                sdfg: SDFG) -> typing.Union[Node, SDFG]:
+        def prog(input, output):
+            output[:] = dace.elementwise(lambda x: log(x), input)
+
+        return program_for_node(prog, sdfg, state, node).to_sdfg()
 
 
 @autoregister_params(op="Sqrt", name="pure")
@@ -296,21 +316,6 @@ class PureMatMul(ONNXForward):
         return program_for_node(einsumop, sdfg, state, node).to_sdfg()
 
 
-@autoregister_params(op="Relu", name="pure")
-class PureRelu(ONNXForward):
-    @staticmethod
-    def forward(node: ONNXOp, state: SDFGState,
-                sdfg: SDFG) -> typing.Union[Node, SDFG]:
-        input_dtype = in_desc_with_name(node, state, sdfg, "X").dtype
-        cast_lambda = "lambda x: max(x, dace.{}(0))".format(
-            input_dtype.to_string())
-
-        def prog(X, Y):
-            Y[:] = dace.elementwise(cast_lambda, X)
-
-        return program_for_node(prog, sdfg, state, node).to_sdfg()
-
-
 @autoregister_params(op="Identity", name="pure")
 class PureIdentity(ONNXForward):
     @staticmethod
@@ -470,7 +475,7 @@ class PureCast(ONNXForward):
         target_type = node.to
         try:
             converters.onnx_tensor_type_to_typeclass(target_type)
-        except ValueError as v:
+        except ValueError:
             return False
 
         return True
@@ -501,7 +506,6 @@ class PureGemm(ONNXForward):
         assert node.alpha == 1.0 and node.beta == 1.0 and node.transA == 0 and node.transB == 1
 
         # the gemm libnode is broken for now, so we just do it manually
-        atype = in_desc_with_name(node, state, sdfg, "A")
         if "C" in node.in_connectors:
 
             def prog(A, B, C, Y):
@@ -516,37 +520,36 @@ class PureGemm(ONNXForward):
         return sdfg
 
 
+@autoregister_params(op="Relu", name="pure")
+class PureRelu(ONNXForward):
+    @staticmethod
+    def forward(node: ONNXOp, state: SDFGState,
+                sdfg: SDFG) -> typing.Union[Node, SDFG]:
+        input_dtype = in_desc_with_name(node, state, sdfg, "X").dtype
+        cast_lambda = "lambda x: max(x, dace.{}(0))".format(
+            input_dtype.to_string())
+
+        def prog(X, Y):
+            Y[:] = dace.elementwise(cast_lambda, X)
+
+        return program_for_node(prog, sdfg, state, node).to_sdfg()
+
+
 @autoregister_params(op="Reshape", name="pure")
 class PureReshape(ONNXForward):
     @staticmethod
     def forward(node: ONNXOp, state: SDFGState,
                 sdfg: SDFG) -> typing.Union[Node, SDFG]:
-        node.validate(sdfg, state)
-        if (in_desc_with_name(node, state, sdfg, "data").dtype !=
-                out_desc_with_name(node, state, sdfg, "reshaped")):
-            raise ValueError(
-                "Expected input and output to have the same dtype.")
+        new_shape = out_desc_with_name(node, state, sdfg, "reshaped").shape
+        node.remove_in_connector("shape")
 
-        expansion = dace.SDFG("_reshape_expansion_")
-        expansion.add_datadesc(
-            "shape",
-            copy.deepcopy(in_desc_with_name(node, state, sdfg, "shape")))
-        expansion.add_datadesc(
-            "data", copy.deepcopy(in_desc_with_name(node, state, sdfg,
-                                                    "data")))
-        expansion.add_datadesc(
-            "reshaped",
-            copy.deepcopy(out_desc_with_name(node, state, sdfg, "reshaped")))
-        expansion.arrays["shape"].transient = False
-        expansion.arrays["data"].transient = False
-        expansion.arrays["reshaped"].transient = False
-        state = expansion.add_state()
-        data = state.add_read("data")
-        reshaped = state.add_write("reshaped")
-        memlet = expansion.make_array_memlet("data")
-        memlet.allow_oob = True
-        state.add_edge(data, None, reshaped, None, memlet)
-        return expansion
+        shape_node = in_edge_with_name(node, state, "shape").src
+        constant_folding.remove_node_and_computation(sdfg, state, shape_node)
+
+        def prog(data, reshaped):
+            reshaped[:] = np.reshape(data, new_shape)
+
+        return program_for_node(prog, sdfg, state, node).to_sdfg()
 
 
 @autoregister_params(op="LogSoftmax", name="pure")

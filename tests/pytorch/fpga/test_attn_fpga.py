@@ -15,7 +15,7 @@ from dace import StorageType
 from dace import SDFG
 import argparse
 import dace
-from daceml.util import  utils
+from daceml.util import utils
 ###################################################################
 # Transformer configurations to be used for MHA
 # Note:
@@ -70,7 +70,6 @@ configurations = {
 }
 
 
-@pytest.mark.ort
 def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
 
     B = batch_size
@@ -83,7 +82,7 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
 
     print("******************************************************")
     print("Executing MHA with configuration: ", configuration_name)
-    print("B: ",B, " H: ", H, " P: ", P, " N: ", N, " SM: ", SM, " SN:", SN)
+    print("B: ", B, " H: ", H, " P: ", P, " N: ", N, " SM: ", SM, " SN:", SN)
     print("******************************************************")
 
     #############
@@ -105,7 +104,6 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
 
     else:
         dace_model = DaceModule(ptmodel, dummy_inputs=(Q, K, V))
-
     dace_model.sdfg.save('/tmp/out_pre.sdfg')
 
     ################################################
@@ -115,7 +113,6 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
         validate_all=True,
         print_report=True)
     dace_model.sdfg.save('/tmp/out.sdfg')
-
     if execute_cpu_dace:
         dace_outputs_1 = dace_model(Q, K, V)
         assert np.allclose(pt_outputs[0].detach().numpy(),
@@ -130,25 +127,26 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
     ##################################
     # Vectorize
     # TODO: this is still partial
-    vec_width = 2 # we can not go further in this because of the systolic organization
+    vec_width = 2  # we can not go further in this because of the systolic organization
     vec_type = dace.vector(dace.float32, vec_width)
-
-    #vectorize input B matmul, output not vectorized
-    input_data_name = "ONNX___tmp33"
-    utils.vectorize_array_and_memlet(sdfg, input_data_name, vec_type)
-    print("Applying vectorization {} to Array {}".format(vec_width, input_data_name))
-
-    # vectorize input B matmul, output not vectorized
-    input_data_name = "ONNX___tmp36"
-    utils.vectorize_array_and_memlet(sdfg, input_data_name, vec_type)
-    print("Applying vectorization {} to Array {}".format(vec_width, input_data_name))
-
-    # vectorize input B matmul, output not vectorized
-    input_data_name = "ONNX___tmp37"
-    utils.vectorize_array_and_memlet(sdfg, input_data_name, vec_type)
-    sdfg.save('/tmp/out_vectorized.sdfg')
+    #
+    # #vectorize input B matmul, output not vectorized
+    # input_data_name = "ONNX___tmp33"
+    # utils.vectorize_array_and_memlet(sdfg, input_data_name, vec_type)
+    # print("Applying vectorization {} to Array {}".format(
+    #     vec_width, input_data_name))
+    #
+    # # vectorize input B matmul, output not vectorized
+    # input_data_name = "ONNX___tmp36"
+    # utils.vectorize_array_and_memlet(sdfg, input_data_name, vec_type)
+    # print("Applying vectorization {} to Array {}".format(
+    #     vec_width, input_data_name))
+    #
+    # # vectorize input B matmul, output not vectorized
+    # input_data_name = "ONNX___tmp37"
+    # utils.vectorize_array_and_memlet(sdfg, input_data_name, vec_type)
+    # sdfg.save('/tmp/out_vectorized.sdfg')
     # ##################################
-
 
     ###################################################
     # Transform to FPGA
@@ -158,16 +156,25 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
     donnx.ONNXSoftmax.default_implementation = "fpga"
     donnx.ONNXReduceSum.default_implementation = "fpga"
 
-    sdfg.apply_transformations([FPGATransformSDFG])
-    sdfg.expand_library_nodes()
+    sdfg.apply_transformations([FPGATransformSDFG], validate=False)
     sdfg.save('/tmp/out_fpga_pre_inlined.sdfg')
+    sdfg.expand_library_nodes()
 
     sdfg.apply_transformations_repeated([InlineSDFG])
     sdfg.apply_transformations_repeated(PruneConnectors)
     sdfg.save('/tmp/out_fpga.sdfg')
 
     # Streaming composition (Prov. disabled)
-    #sdfg.apply_transformations_repeated([InlineSDFG, sm.StreamingComposition], [{}, {"storage": StorageType.FPGA_Local}], print_report=True)
+    sdfg.apply_transformations_repeated([InlineSDFG, sm.StreamingMemory],
+                                        [{}, {
+                                            "storage": StorageType.FPGA_Local
+                                        }],
+                                        print_report=True)
+    sdfg.apply_transformations_repeated([InlineSDFG, sm.StreamingComposition],
+                                        [{}, {
+                                            "storage": StorageType.FPGA_Local
+                                        }],
+                                        print_report=True)
     sdfg.save('/tmp/out_fpga.sdfg')
 
     dace_output_fpga = dace_model(Q, K, V)
@@ -187,17 +194,12 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("B",
-                        type=int,
-                        nargs="?",
-                        default=2,
-                        help="Batch size")
+    parser.add_argument("B", type=int, nargs="?", default=2, help="Batch size")
     parser.add_argument("conf",
                         type=str,
                         nargs="?",
                         default="tiny",
                         help="Configuration")
-
 
     args = vars(parser.parse_args())
     B = args["B"]

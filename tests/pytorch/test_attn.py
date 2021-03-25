@@ -28,7 +28,9 @@ def test_attn():
     dace_outputs_0 = dace_model(Q, K, V)
 
     dace_model.dace_model.sdfg.apply_transformations_repeated(
-        [ConstantFolding, RedundantSecondArray], validate_all=True)
+        [ConstantFolding, RedundantSecondArray],
+        validate_all=True,
+        strict=True)
     dace_outputs_1 = dace_model(Q, K, V)
 
     assert np.allclose(pt_outputs[0].detach().numpy(),
@@ -39,4 +41,3 @@ def test_attn():
                        atol=1e-06)
 
 
-test_attn()

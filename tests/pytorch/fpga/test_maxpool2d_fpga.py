@@ -2,7 +2,6 @@
 
 # TODO: conform to pytest syntax if needed
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,7 +24,6 @@ class Model(nn.Module):
         return F.max_pool2d(x, 2)
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("W",
@@ -44,21 +42,14 @@ if __name__ == "__main__":
     data_shape = (1000, 6, 32, 32)
     x = torch.rand(data_shape)
 
-
     dace_model = DaceModule(ptmodel)
     dace_output = dace_model(x)
-
     torch_output = ptmodel(x)
-
-
-    assert np.allclose(torch_output.detach().numpy(), dace_output, atol=1e-06)
-
+    assert np.allclose(torch_output.detach().numpy(),
+                       dace_output.numpy(),
+                       atol=1e-06)
 
     # Transform to FPGA
-
-    sdfg = dace_model.sdfg
-    # Transform to FPGA
-
     sdfg = dace_model.sdfg
 
     ##################################
@@ -69,24 +60,17 @@ if __name__ == "__main__":
     utils.vectorize_array_and_memlet(sdfg, "ONNX_0", vec_type)
 
     ##########################################
-    dace_model.sdfg.save('/tmp/out.sdfg')
-    # orig_sdfg = copy.deepcopy(sdfg)
-    # orig_sdfg.expand_library_nodes()
-    # orig_sdfg.save('/tmp/out_expanded.sdfg')
 
     donnx.ONNXMaxPool.default_implementation = "fpga"
-    sdfg.save('/tmp/out_fpga.sdfg')
 
     sdfg.apply_transformations([FPGATransformSDFG])
-    # sdfg.states()[0].location["is_FPGA_kernel"] = False
     sdfg.expand_library_nodes()
     sdfg.apply_transformations_repeated([InlineSDFG])
-
-    sdfg.save('/tmp/out_fpga_expanded.sdfg')
     dace_output_fpga = dace_model(torch.clone(x))
 
     print(
         "Difference: ",
-        np.linalg.norm(torch_output.detach().numpy() - dace_output_fpga) /
-        dace_output_fpga.size)
-    assert np.allclose(torch_output.detach().numpy(), dace_output_fpga)
+        np.linalg.norm(torch_output.detach().numpy() -
+                       dace_output_fpga.numpy()) /
+        np.linalg.norm(torch_output.detach().numpy()))
+    assert np.allclose(torch_output.detach().numpy(), dace_output_fpga.numpy())
