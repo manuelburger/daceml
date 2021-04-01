@@ -2,18 +2,18 @@ import logging
 import os
 import tempfile
 from functools import wraps
-import typing
-
-import torch
-import torch.nn as nn
-import onnx
-from torch.onnx import TrainingMode
+from typing import Optional, Tuple
 
 import dace
+import onnx
+import torch
+import torch.nn as nn
+from torch.onnx import TrainingMode
 
 from daceml.autodiff.pytorch import make_backward_function
 from daceml.onnx import ONNXModel
 from daceml.onnx.shape_inference import infer_shapes
+from daceml.util import utils
 
 
 class DaceModule(nn.Module):
@@ -27,6 +27,7 @@ class DaceModule(nn.Module):
         :param apply_strict: whether to apply strict transforms after conversion (this generally improves performance,
                              but can be slow).
         :param sdfg_name: the name to give to the sdfg (defaults to ``dace_model``).
+        :param auto_optimize: whether to apply automatic optimizations.
 
         :Example:
 
@@ -45,26 +46,31 @@ class DaceModule(nn.Module):
             Automatically expanded library node "ONNX_Sqrt_1" with implementation "onnxruntime".
             tensor([0., 0.])
     """
-    def __init__(
-            self,
-            module: nn.Module,
-            dummy_inputs: typing.Optional[typing.Tuple[torch.Tensor]] = None,
-            cuda: bool = False,
-            train: bool = False,
-            backward=False,
-            apply_strict: bool = False,
-            sdfg_name: typing.Optional[str] = None):
+    def __init__(self,
+                 module: nn.Module,
+                 dummy_inputs: Optional[Tuple[torch.Tensor]] = None,
+                 cuda: bool = False,
+                 train: bool = False,
+                 backward=False,
+                 apply_strict: bool = False,
+                 auto_optimize: bool = True,
+                 sdfg_name: Optional[str] = None):
         super(DaceModule, self).__init__()
 
         self.backward = backward
         self.model = module
+        self.dace_model: Optional[ONNXModel] = None
         self.train = train
-        self.sdfg: typing.Optional[dace.SDFG] = None
+        self.sdfg: Optional[dace.SDFG] = None
         self.cuda = cuda
         self.sdfg_name = sdfg_name or "dace_model"
+        self.auto_optimize = auto_optimize
         self.apply_strict = apply_strict
+
+        self.function = None
+
         if dummy_inputs is not None:
-            self.dace_model = self._initialize_sdfg(dummy_inputs)
+            self.function = self._initialize_sdfg(dummy_inputs)
 
     def _initialize_sdfg(self, dummy_inputs):
         # TODO change to StringIO if not too big
@@ -93,13 +99,24 @@ class DaceModule(nn.Module):
                                    onnx_model,
                                    infer_shapes=False,
                                    cuda=self.cuda,
-                                   apply_strict=self.apply_strict)
+                                   parent_pytorch_module=self.model,
+                                   auto_optimize=self.auto_optimize)
             self.sdfg = dace_model.sdfg
+            self.dace_model = dace_model
+
             self.sdfg.validate()
 
             if self.backward:
                 function = make_backward_function(
                     dace_model, apply_strict=self.apply_strict)
+
+                if self.auto_optimize:
+                    utils.auto_optimize(function._forward_model.sdfg,
+                                        self.cuda,
+                                        apply_strict=self.apply_strict)
+                    utils.auto_optimize(function._backward_sdfg,
+                                        self.cuda,
+                                        apply_strict=self.apply_strict)
 
                 def forward(*args):
                     args_and_params = list(args)
@@ -108,26 +125,32 @@ class DaceModule(nn.Module):
 
                 return forward
             else:
+                if self.auto_optimize:
+                    self.dace_model.auto_optimize()
+
+                if self.apply_strict:
+                    self.dace_model.sdfg.apply_strict_transformations()
+
                 return dace_model
 
     def forward(self, *actual_inputs):
         """ Execute the forward pass using the traced ``module``."""
-        if self.sdfg is None:
-            self.dace_model = self._initialize_sdfg(actual_inputs)
+        if self.function is None:
+            self.function = self._initialize_sdfg(actual_inputs)
 
-        outputs = self.dace_model(*actual_inputs)
+        outputs = self.function(*actual_inputs)
         return outputs
 
 
 @dace.dtypes.paramdec
-def dace_module(
-        moduleclass,
-        dummy_inputs: typing.Optional[typing.Tuple[torch.Tensor]] = None,
-        cuda: bool = False,
-        train: bool = False,
-        backward=False,
-        apply_strict: bool = False,
-        sdfg_name: typing.Optional[str] = None):
+def dace_module(moduleclass,
+                dummy_inputs: Optional[Tuple[torch.Tensor]] = None,
+                cuda: bool = False,
+                train: bool = False,
+                backward=False,
+                apply_strict: bool = False,
+                auto_optimize: bool = True,
+                sdfg_name: Optional[str] = None):
     """ Decorator to apply on a definition of a ``torch.nn.Module`` to
         convert it to a data-centric module upon construction.
 
@@ -153,6 +176,7 @@ def dace_module(
         :param backward: whether to enable the backward pass.
         :param apply_strict: whether to apply strict transforms after conversion (this generally improves performance,
                              but can be slow).
+        :param auto_optimize: whether to apply automatic optimizations.
         :param sdfg_name: the name to give to the sdfg (defaults to ``dace_model``).
     """
     @wraps(moduleclass)
@@ -163,6 +187,7 @@ def dace_module(
                           train=train,
                           backward=backward,
                           apply_strict=apply_strict,
+                          auto_optimize=auto_optimize,
                           sdfg_name=sdfg_name)
 
     return _create
