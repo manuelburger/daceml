@@ -397,10 +397,10 @@ class FPGAIm2ColConv(ONNXForward):
                                            len(node.dilations) != image_dims):
             return False
 
-        print(f"---> ATTENTION: skip padding check on Convolution")
-        # if node.pads is not None and (not all(p == 0 for p in node.pads)
-        #                               or len(node.pads) != image_dims * 2):
-        #     return False
+        # Support all same padding
+        if node.pads is not None and (not all(p == node.pads[0] for p in node.pads)
+                                      or len(node.pads) != image_dims * 2):
+            return False
 
         if node.strides is not None and len(node.strides) != image_dims:
             return False
@@ -451,8 +451,8 @@ class FPGAIm2ColConv(ONNXForward):
         padding = node.pads[0] # assume all same padding, TODO: add test
         offset = 2* (filter_hx // 2 - padding) # assumes square kernel of odd size, TODO: add test
 
-        print("Input Size: {}x{}".format(input_size_x, input_size_y))
-        print("Output Size: {}x{}".format(output_size_x, output_size_y))
+        # print("Input Size: {}x{}".format(input_size_x, input_size_y))
+        # print("Output Size: {}x{}".format(output_size_x, output_size_y))
 
         new_sdfg = dace.SDFG("fpga_im2col_conv")
 
@@ -476,7 +476,9 @@ class FPGAIm2ColConv(ONNXForward):
 
         K = num_channels * filter_hx * filter_hy
         M = output_size_y * output_size_x
+
         P = num_filters  # Num PEs  #TODO parametric
+        P = math.gcd(num_filters, 16) # restrict number of PEs per convolution
 
         # safe delay: see explanation in the make_compute function
         L = max(11 - M, 0)
@@ -568,7 +570,7 @@ class FPGAIm2ColConv(ONNXForward):
             pipe = state.add_write("im2col_pipe")
             vect_data = state.add_access("vec_data_im2col")
 
-            print("Output X: {}, Output Y: {}, Vector: {}".format(output_size_x, output_size_y, vec_width))
+            # print("Output X: {}, Output Y: {}, Vector: {}".format(output_size_x, output_size_y, vec_width))
 
 
             tasklet = state.add_tasklet("read_X", {"from_memory"},
@@ -1790,19 +1792,35 @@ class FPGAReshape(ONNXForward):
     def forward(node: ONNXOp, state: SDFGState,
                 sdfg: SDFG) -> typing.Union[Node, SDFG]:
         node.validate(sdfg, state)
-        if (in_desc_with_name(node, state, sdfg, "data").dtype !=
-                out_desc_with_name(node, state, sdfg, "reshaped")):
+
+        input_name = "data"
+        output_name = "reshaped"
+        flatten = False
+
+        # if called from Flatten
+        if "input" in node._in_connectors.keys():
+            input_name = "input"
+            output_name = "output"
+            flatten = True
+
+        if (in_desc_with_name(node, state, sdfg, input_name).dtype !=
+                out_desc_with_name(node, state, sdfg, output_name).dtype):
             raise ValueError(
                 "Expected input and output to have the same dtype.")
 
-        new_shape = out_desc_with_name(node, state, sdfg, "reshaped").shape
-        node.remove_in_connector("shape")
+        new_shape = out_desc_with_name(node, state, sdfg, output_name).shape
 
-        shape_node = in_edge_with_name(node, state, "shape").src
-        constant_folding.remove_node_and_computation(sdfg, state, shape_node)
+        if not flatten:
+            node.remove_in_connector("shape")
+            shape_node = in_edge_with_name(node, state, "shape").src
+            constant_folding.remove_node_and_computation(sdfg, state, shape_node)
 
-        def prog(data, reshaped):
-            reshaped[:] = np.reshape(data, new_shape)
+        if not flatten:
+            def prog(data, reshaped):
+                reshaped[:] = np.reshape(data, new_shape)
+        else:
+            def prog(input, output):
+                output[:] = np.reshape(input, new_shape)
 
         return program_for_node(prog, sdfg, state, node).to_sdfg()
 
@@ -2651,35 +2669,38 @@ class FPGAAveragePool2D(ONNXForward):
     def forward(node: ONNXOp, state: SDFGState,
                 sdfg: SDFG) -> typing.Union[Node, SDFG]:
 
-        # TODO: provide implementation
-        print(f"---> ATTENTION: dummy implementation for node {FPGAAveragePool2D}")
+        # # TODO: provide implementation
+        # print(f"---> ATTENTION: dummy implementation for node {FPGAAveragePool2D}")
 
-        # Get inputs and outputs names
-        X = in_desc_with_name(node, state, sdfg, "X")
-        Y = out_desc_with_name(node, state, sdfg, "Y")
+        # # Get inputs and outputs names
+        # X = in_desc_with_name(node, state, sdfg, "X")
+        # Y = out_desc_with_name(node, state, sdfg, "Y")
 
-        # Create inner SDFG
-        op_sdfg = dace.SDFG(node.name + "_dummy")
-        compute_state = op_sdfg.add_state("dummy_state")
+        # # Create inner SDFG
+        # op_sdfg = dace.SDFG(node.name + "_dummy")
+        # compute_state = op_sdfg.add_state("dummy_state")
 
-        x_inner = X.clone()
-        x_inner.transient = False
-        y_inner = Y.clone()
-        y_inner.transient = False
+        # x_inner = X.clone()
+        # x_inner.transient = False
+        # y_inner = Y.clone()
+        # y_inner.transient = False
 
-        op_sdfg.add_datadesc("X", x_inner)
-        op_sdfg.add_datadesc("Y", y_inner)
+        # op_sdfg.add_datadesc("X", x_inner)
+        # op_sdfg.add_datadesc("Y", y_inner)
 
-        x_in = compute_state.add_read("X")
-        y_out = compute_state.add_write("Y")
+        # x_in = compute_state.add_read("X")
+        # y_out = compute_state.add_write("Y")
 
-        compute_state.add_memlet_path(
-            x_in,
-            y_out,
-            memlet=dace.Memlet(f"X[0]")
-        )
+        # compute_state.add_memlet_path(
+        #     x_in,
+        #     y_out,
+        #     memlet=dace.Memlet(f"X[0,0,0,0]")
+        # )
 
-        return op_sdfg
+        # return op_sdfg
+
+        print(f"---> ATTENTION: {FPGAMaxPool2D} implementation for node {FPGAAveragePool2D}")
+        return FPGAMaxPool2D.forward(node, state, sdfg)
 
 
 # TODO: implement
@@ -2697,33 +2718,5 @@ class FPGAFlatten(ONNXForward):
     def forward(node: ONNXOp, state: SDFGState,
                 sdfg: SDFG) -> typing.Union[Node, SDFG]:
 
-        # TODO: provide implementation
-        print(f"---> ATTENTION: dummy implementation for node {FPGAFlatten}")
-
-
-        # Get inputs and outputs names
-        input = in_desc_with_name(node, state, sdfg, "input")
-        output = out_desc_with_name(node, state, sdfg, "output")
-
-        # Create inner SDFG
-        op_sdfg = dace.SDFG(node.name + "_dummy")
-        compute_state = op_sdfg.add_state("dummy_state")
-
-        input_inner = input.clone()
-        input_inner.transient = False
-        output_inner = output.clone()
-        output_inner.transient = False
-
-        op_sdfg.add_datadesc("input", input_inner)
-        op_sdfg.add_datadesc("output", output_inner)
-
-        input_in = compute_state.add_read("input")
-        output_out = compute_state.add_write("output")
-
-        compute_state.add_memlet_path(
-            input_in,
-            output_out,
-            memlet=dace.Memlet(f"input[0]")
-        )
-
-        return op_sdfg
+        # Reuse Reshape implementation
+        return FPGAReshape.forward(node, state, sdfg)
