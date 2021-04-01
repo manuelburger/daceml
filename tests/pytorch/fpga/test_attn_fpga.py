@@ -99,11 +99,11 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
     pt_outputs = ptmodel(Q, K, V)
 
     if execute_cpu_dace:
-        dace_model = DaceModule(ptmodel, dummy_inputs=(Q, K, V))
+        dace_model = DaceModule(ptmodel, dummy_inputs=(Q, K, V), auto_optimize=False)
         # dace_outputs_0 = dace_model(Q, K, V)
 
     else:
-        dace_model = DaceModule(ptmodel, dummy_inputs=(Q, K, V))
+        dace_model = DaceModule(ptmodel, dummy_inputs=(Q, K, V), auto_optimize=False)
     dace_model.sdfg.save('/tmp/out_pre.sdfg')
 
     ################################################
@@ -127,8 +127,8 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
     ##################################
     # Vectorize
     # TODO: this is still partial
-    vec_width = 2  # we can not go further in this because of the systolic organization
-    vec_type = dace.vector(dace.float32, vec_width)
+    # vec_width = 2  # we can not go further in this because of the systolic organization
+    # vec_type = dace.vector(dace.float32, vec_width)
     #
     # #vectorize input B matmul, output not vectorized
     # input_data_name = "ONNX___tmp33"
@@ -180,9 +180,9 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
     dace_output_fpga = dace_model(Q, K, V)
 
     diff0 = np.linalg.norm(pt_outputs[0].detach().numpy() -
-                           dace_output_fpga[0]) / dace_output_fpga[0].size
+                           dace_output_fpga[0].numpy()) / np.linalg.norm(pt_outputs[0].detach().numpy())
     diff1 = np.linalg.norm(pt_outputs[1].detach().numpy() -
-                           dace_output_fpga[1]) / dace_output_fpga[1].size
+                           dace_output_fpga[1].numpy()) /  np.linalg.norm(pt_outputs[1].detach().numpy())
 
     assert np.allclose(pt_outputs[0].detach().numpy(),
                        dace_output_fpga[0],
@@ -194,7 +194,7 @@ def test_attn(batch_size, configuration_name, execute_cpu_dace=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("B", type=int, nargs="?", default=2, help="Batch size")
+    parser.add_argument("B", type=int, nargs="?", default=1, help="Batch size")
     parser.add_argument("conf",
                         type=str,
                         nargs="?",
