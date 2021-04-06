@@ -1063,7 +1063,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # Set number of processing elements
         P = num_filters  # Num PEs  #TODO parametric
         P = math.gcd(num_filters, 4) # restrict number of PEs per convolution
-        P = 2
+        P = 8
 
         print(f"Using {P} PEs to compute {num_filters} filters; {num_filters/P} filters per PE")
 
@@ -1151,7 +1151,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         if T is None:
             T = M
 
-        print("Tile size:", T, " number of tiles: ", math.ceil(M/T))
+        print(f"Tile size: {K}x{T}", " number of tiles: ", math.ceil(M/T))
 
         # we will perform sanity check using T and M. But at this stage, we still
         # don't know to what outer symbol they will map.
@@ -1174,6 +1174,8 @@ class FPGAIm2ColConv_tiled(ONNXForward):
             L = max(16 - T_constant, 0)
         else:
             L = 0
+
+        print("Safe delay: ", L)
 
         # This implementation uses a flattened nested loop, that overlaps feeding,
         # computing and draining phases. Each PE is responsible for computing one
@@ -1572,7 +1574,7 @@ if m >= {L} and not {entry_pipeline.pipeline.drain_condition()}:
 # How: 
 # - if k = K-1 and m>=L: then the PE drains its own result
 #-  otherwise, if k_drain<p forward data coming from previous PEs (this could happens also in the drain phase)
-if((n0 > 0 or tm > 0)  and k_drain <p and m_drain <{T}) or  (k=={K}-1 and m>= {L}) or ({entry_pipeline.pipeline.drain_condition()} and k_drain < p):
+if((b > 0 or n0 > 0 or tm > 0)  and k_drain <p and m_drain <{T}) or  (k=={K}-1 and m>= {L}) or ({entry_pipeline.pipeline.drain_condition()} and k_drain < p): # modification to standard GEMM, also consider b
     c_pipe_out = result if (p==0 or (k_drain=={K}-1 and not {entry_pipeline.pipeline.drain_condition()})) else forward_in
 # adjust draining iterators
 if not {entry_pipeline.pipeline.drain_condition()}:
@@ -1683,7 +1685,6 @@ else:
                                 memlet=dace.Memlet())
 
         # build the compute State
-
         new_sdfg.add_stream("A_pipe",
                             dtype_a,
                             transient=True,
