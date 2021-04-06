@@ -1076,9 +1076,13 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
         # Set tile size; TODO: parametric or determine
         # good tile size based on input shapes
-        tile_size_m = min(8, M)
+        tile_size_m = min(16, M)
         if Y.dtype.veclen > tile_size_m:
             tile_size_m = Y.dtype.veclen
+
+        # veclen and tile size need to be compatible
+        if not tile_size_m % Y.dtype.veclen == 0:
+            tile_size_m = math.gcd(tile_size_m, Y.dtype.veclen)
 
         # ==================================
         # Im2Col from DaCe Master GEMM
@@ -1406,7 +1410,6 @@ else:
             vec_buf = state.add_access("vec_buf")
 
             # write in memory by adding C when we copy that to memory
-
             # deal with out-of-bound accesses
             if add_bias:
                 add_prev_c = " + prev_c"
