@@ -978,8 +978,8 @@ class FPGAIm2ColConv_tiled(ONNXForward):
                                       or len(node.pads) != image_dims * 2):                
             return False
 
-        if node.pads is not None and node.pads[0] > 0:
-            raise ValueError("Attention, no padding support yet on tiled Im2Col Convolution")
+        # if node.pads is not None and node.pads[0] > 0:
+        #     raise ValueError("Attention, no padding support yet on tiled Im2Col Convolution")
 
         # Currently only support vectorization on Y
         if X.dtype.veclen > 1 or W.dtype.veclen > 1:
@@ -1031,8 +1031,8 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # Take output size: note, tat this accounts for vectorization (if present)
         input_size_x, input_size_y = X.shape[2:]
         output_size_x, output_size_y = Y.shape[2:]
-        padding = node.pads[0] # assume all same padding, TODO: add test
-        offset = 2* (filter_hx // 2 - padding) # assumes square kernel of odd size, TODO: add test
+        padding = node.pads[0] # assume all same padding
+        offset = 2* (filter_hx // 2 - padding) # assumes square kernel, TODO: add test
 
         print("Shape X:", X.shape)
         print("Shape Y:", Y.shape)
@@ -1301,6 +1301,24 @@ to_kernel = data""")
             },
             schedule=dace.ScheduleType.FPGA_Device)
 
+            # Access mapping for Im2Col
+            channel = f"int_floor(k, ({filter_hx} * {filter_hy}))"
+            matrix_col = f"(tm*{T} + m)" # matrix column access
+            out_y = f"int_floor({matrix_col}, {output_size_x})" # y position in output
+            out_y_cpp = f"{matrix_col} / {output_size_x}" # y position in output
+            out_x = f"{matrix_col} % {output_size_x}" # x position in output
+
+            filter_off_y = f"int_floor((k % ({filter_hx} * {filter_hy})), {filter_hx})"
+            filter_off_y_cpp = f"(k % ({filter_hx} * {filter_hy})) / {filter_hx}"
+            filter_off_x = f"(k % ({filter_hx} * {filter_hy})) % {filter_hx}"
+
+            access_y = f"({out_y}) + {filter_off_y}"
+            access_y_cpp = f"({out_y_cpp}) + {filter_off_y_cpp}"
+            access_x = f"({out_x}) + {filter_off_x}"
+
+            access = f"[b, {channel}, {access_y} - {padding}, {access_x} - {padding}]"
+
+
             # If we are out-of bound, use a dummy value
             new_sdfg.add_array("B_dummy",
                             dtype=vec_type,
@@ -1316,12 +1334,19 @@ to_kernel = data""")
                                 src_conn="init_data",
                                 memlet=dace.Memlet("B_dummy[0]"))
 
+            # Padding out of image test
+            padding_test_x = f"({access_x} - {padding} < {output_size_x} + {offset} and {access_x}  - {padding} >= 0)"
+            padding_test_y = f"({access_y_cpp} - {padding} < {output_size_y * Y.dtype.veclen} + {offset} and {access_y_cpp}  - {padding} >= 0)"
+
             mem = state.add_read("X")
             pipe = state.add_write("B_pipe")
             tasklet = state.add_tasklet(
                 "read_B", {"from_memory", "dummy_data"}, {"to_kernel"}, f"""\
-data = from_memory if tm*{T} + m < {M} else dummy_data
-to_kernel = data""")
+if tm*{T} + m < {M} and {padding_test_x} and {padding_test_y}:
+    to_kernel = from_memory 
+else:
+    to_kernel = dummy_data
+""")
 
             state.add_memlet_path(b_dummy,
                                 entry,
@@ -1329,17 +1354,7 @@ to_kernel = data""")
                                 dst_conn="dummy_data",
                                 memlet=dace.Memlet("B_dummy[0]"))
 
-            # Access mapping for Im2Col
-            channel = f"int_floor(k, ({filter_hx} * {filter_hy}))"
-            matrix_col = f"(tm*{T} + m)" # matrix column access
-            out_y = f"int_floor({matrix_col}, {output_size_x})" # y position in output
-            out_x = f"{matrix_col} % {output_size_x}" # x position in output
-            filter_off_y = f"int_floor((k % ({filter_hx} * {filter_hy})), {filter_hx})"
-            filter_off_x = f"(k % ({filter_hx} * {filter_hy})) % {filter_hx}"
-            access_y = f"({out_y}) + {filter_off_y}"
-            access_x = f"({out_x}) + {filter_off_x}"
 
-            access = f"[b, {channel}, {access_y}, {access_x}]"
 
             state.add_memlet_path(mem,
                                 entry,
