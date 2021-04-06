@@ -975,7 +975,14 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
         # Support all same padding
         if node.pads is not None and (not all(p == node.pads[0] for p in node.pads)
-                                      or len(node.pads) != image_dims * 2):
+                                      or len(node.pads) != image_dims * 2):                
+            return False
+
+        if node.pads is not None and node.pads[0] > 0:
+            raise ValueError("Attention, no padding support yet on tiled Im2Col Convolution")
+
+        # Currently only support vectorization on Y
+        if X.dtype.veclen > 1 or W.dtype.veclen > 1:
             return False
 
         if node.strides is not None and len(node.strides) != image_dims:
@@ -995,10 +1002,6 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         X = in_desc_with_name(node, state, sdfg, "X")
         W = in_desc_with_name(node, state, sdfg, "W")
         Y = out_desc_with_name(node, state, sdfg, "Y")
-
-        # print(Y.__dict__)
-        # print(X.__dict__)
-        # print(W.__dict__)
 
         # TODO
         #  - The current implementation support vectorization on Y only. Support vectorization also for X
@@ -1057,13 +1060,13 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         x_base_type = X.dtype.base_type
 
         K = num_channels * filter_hx * filter_hy
-        M = output_size_y * output_size_x
+        M = output_size_y * Y.dtype.veclen * output_size_x # account for vectorization on Y
         
 
         # Set number of processing elements
         P = num_filters  # Num PEs  #TODO parametric
         P = math.gcd(num_filters, 4) # restrict number of PEs per convolution
-        P = 8
+        P = 4
 
         print(f"Using {P} PEs to compute {num_filters} filters; {num_filters/P} filters per PE")
 
@@ -1074,6 +1077,8 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # Set tile size; TODO: parametric or determine
         # good tile size based on input shapes
         tile_size_m = min(8, M)
+        if Y.dtype.veclen > tile_size_m:
+            tile_size_m = Y.dtype.veclen
 
         # ==================================
         # Im2Col from DaCe Master GEMM
@@ -1111,11 +1116,12 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         print("Virtual weight matrix: ", shape_a)
 
         # outer_array_b = X
-        shape_b = (filter_hx * filter_hy * num_channels, output_size_x * output_size_y)
+        shape_b = (filter_hx * filter_hy * num_channels, output_size_x * output_size_y * Y.dtype.veclen)  # account for vectorization on Y
         print("Virtual image matrix: ", shape_b)
 
         # outer_array_c = Y
         shape_c = Y.shape # (num_filters, output_size_x * output_size_y)
+        shape_c = (shape_c[0], shape_c[1], shape_c[2], shape_c[3] * Y.dtype.veclen) # Fix length (vectorization)
         print("Shape C:", shape_c)
 
         # Get types
@@ -1133,8 +1139,8 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         if len(shape_a) != 2 or len(shape_b) != 2 or shape_a[1] != shape_b[0]:
             raise SyntaxError("Matrix sizes must match")
 
-        if X.dtype.veclen != Y.dtype.veclen:
-            raise SyntaxError("Vectorization lengths of B (input X, Im2Col) and C (Bias) must match")
+        # if X.dtype.veclen != Y.dtype.veclen:
+        #     raise SyntaxError("Vectorization lengths of B (input X, Im2Col) and C (Bias) must match")
 
         ######################################################################
         # GEMM Parameters and checks
@@ -1364,9 +1370,25 @@ to_kernel = data""")
                     "n0": f"0:ceiling({N}/{P})",
                     "tm": f"0:ceiling({M}/{T})",
                     "n1": f"0:{P}",
-                    "m": f"0:{T}"
+                    # "m": f"0:{T}"
+                    "m": f"0:{T / Y.dtype.veclen}" # vectorization support on output
                 },
                 schedule=dace.ScheduleType.FPGA_Device)
+
+            # Output vectors
+            vec_width = Y.dtype.veclen
+            read_map_entry, read_map_exit = state.add_map(
+                "unrolled_reads_PEs", {"x1": "0:{}".format(vec_width)},
+                schedule=dace.ScheduleType.FPGA_Device,
+                unroll=True)
+
+            # local storage to accumulate data
+            new_sdfg.add_array('vec_buf',
+                           shape=[vec_width],
+                           dtype=Y.dtype.base_type,
+                           transient=True,
+                           storage=dace.dtypes.StorageType.FPGA_Registers)
+            vec_buf = state.add_access("vec_buf")
 
             # write in memory by adding C when we copy that to memory
 
@@ -1378,32 +1400,42 @@ to_kernel = data""")
 
             tasklet_inputs = {"from_kernel", "prev_c"
                             } if add_bias else {"from_kernel"}
+#             tasklet = state.add_tasklet(
+#                 "write_C", tasklet_inputs, {"to_memory"}, f"""\
+# if tm * {T} + m  < {M}  and  n0 * {P} + n1 < {N} :                                               
+#     to_memory = from_kernel{add_prev_c}
+# """)
+
+            # output vectors
             tasklet = state.add_tasklet(
                 "write_C", tasklet_inputs, {"to_memory"}, f"""\
-if tm * {T} + m  < {M}  and  n0 * {P} + n1 < {N} :                                               
+if tm * {T} + m * {Y.dtype.veclen} < {M}  and  n0 * {P} + n1 < {N} :                                               
     to_memory = from_kernel{add_prev_c}
+else:
+    to_memory = 0
 """)
+
             state.add_memlet_path(pipe,
                                 entry_map,
+                                read_map_entry, # output vectors
                                 tasklet,
                                 dst_conn="from_kernel",
                                 memlet=dace.Memlet(f"C_pipe[{P}-1]"))
 
+            # print(f"DEBUG: {output_size_x / Y.dtype.veclen}")
             # Access conversion
-            matrix_col = f"(tm*{T} + m)" # matrix column access
+            matrix_col = f"(tm*{T} + m * {Y.dtype.veclen})" # matrix column access
             out_filter = f"n0 * {P} + n1" # out_filter is equal to row of Im2Col output
-            # out_y = f"({matrix_col} // {output_size_x})" # y position in output
             out_y = f"int_floor({matrix_col}, {output_size_x})" # y position in output
-            out_x = f"({matrix_col} % {output_size_x})" # x position in output
+            out_x = f"(({matrix_col} % {output_size_x}) / {Y.dtype.veclen})" # x position in output
 
             access = f"[b, {out_filter}, {out_y}, {out_x}]"
-            # access = f"[0, 0, {out_x}, {out_y}]"
-            # fixed_access = f"[b * {Y.shape[3] * Y.shape[2] * Y.shape[1]} + {out_filter} * {Y.shape[3] * Y.shape[2]} + {out_y} * {Y.shape[3]} + {out_x}]"
-            # print("Write indexing", access)
+            # print("Access:", access)
 
             if add_bias:
                 state.add_memlet_path(mem_read,
                                     entry_map,
+                                    read_map_entry, # output vectors
                                     tasklet,
                                     dst_conn="prev_c",
                                     memlet=dace.Memlet(
@@ -1411,35 +1443,43 @@ if tm * {T} + m  < {M}  and  n0 * {P} + n1 < {N} :
                                         dynamic=True,
                                         allow_oob=True))
 
+            # Previously no vectorization support
+            # state.add_memlet_path(tasklet,
+            #                     exit_map,
+            #                     mem,
+            #                     src_conn="to_memory",
+            #                     memlet=dace.Memlet(
+            #                         f"Y{access}",
+            #                         dynamic=True,
+            #                         allow_oob=True))
+
+            # Support writing out vectors
             state.add_memlet_path(tasklet,
-                                exit_map,
-                                mem,
+                                read_map_exit,
+                                vec_buf,
                                 src_conn="to_memory",
-                                memlet=dace.Memlet(
+                                memlet=dace.Memlet(f"vec_buf[x1]"))
+
+            copy_out_tasklet = state.add_tasklet('pack_and_write_out',
+                                                 {'in_con'}, {'out_con'},
+                                                 f"""\
+if tm * {T} + m * {Y.dtype.veclen} < {M}  and  n0 * {P} + n1 < {N} :                                               
+    out_con = in_con
+""")
+            state.add_memlet_path(vec_buf,
+                                  copy_out_tasklet,
+                                  dst_conn="in_con",
+                                  memlet=dace.Memlet("vec_buf"))
+
+            state.add_memlet_path(copy_out_tasklet,
+                                  exit_map,
+                                  mem,
+                                  src_conn="out_con",
+                                  memlet=dace.Memlet(
                                     f"Y{access}",
-                                    # "Y",
-                                    # subset=f"{access}",
                                     dynamic=True,
                                     allow_oob=True))
-
-            # Because bugs in Sympy
-            # new_sdfg.fill_scope_connectors()
-            # print(Y.__dict__)
-            # print("mem", mem.__dict__)
-            # # for k in state._nodes.keys():
-            # #     if "write_C" in str(k) and isinstance(k, dace.sdfg.nodes.MapExit):
-            # #         print(k.__dict__)
-
-            # print()
-            # for k, v in state._edges.items():
-            #     if "write_C" in str(k) and isinstance(k._src, dace.sdfg.nodes.MapExit):
-            #         print(k.__dict__)
-            #         print(v._data.__dict__)
-            #         # v._data = dace.Memlet(
-            #         #                 f"Y{access}",
-            #         #                 dynamic=True,
-            #         #                 allow_oob=True)
-            #         print(v)
+            
 
 
         def make_compute(sdfg, state):
