@@ -1063,7 +1063,9 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # Set number of processing elements
         P = num_filters  # Num PEs  #TODO parametric
         P = math.gcd(num_filters, 4) # restrict number of PEs per convolution
-        P = 1
+        P = 2
+
+        print(f"Using {P} PEs to compute {num_filters} filters; {num_filters/P} filters per PE")
 
         # safe delay: see explanation in the make_compute function
         # L set further below
@@ -1106,9 +1108,11 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # Get descriptors and sizes
         # outer_array_a = W
         shape_a = (num_filters, filter_hx * filter_hy * num_channels)
+        print("Virtual weight matrix:", shape_a)
 
         # outer_array_b = X
         shape_b = (filter_hx * filter_hy * num_channels, output_size_x * output_size_y)
+        print("Virtual image matrix:", shape_b)
 
         # outer_array_c = Y
         shape_c = Y.shape # (num_filters, output_size_x * output_size_y)
@@ -1158,6 +1162,8 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # all sizes known at compile time for CNN
         T_constant = T
         K_constant = filter_hx * filter_hy * num_channels
+
+        assert K_constant == K
 
         # Safe delay: this will be used in the compute state, pipeline scope, to insert
         # a delay between accumulation on the same result if needed.
