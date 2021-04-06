@@ -1108,11 +1108,11 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # Get descriptors and sizes
         # outer_array_a = W
         shape_a = (num_filters, filter_hx * filter_hy * num_channels)
-        print("Virtual weight matrix:", shape_a)
+        print("Virtual weight matrix: ", shape_a)
 
         # outer_array_b = X
         shape_b = (filter_hx * filter_hy * num_channels, output_size_x * output_size_y)
-        print("Virtual image matrix:", shape_b)
+        print("Virtual image matrix: ", shape_b)
 
         # outer_array_c = Y
         shape_c = Y.shape # (num_filters, output_size_x * output_size_y)
