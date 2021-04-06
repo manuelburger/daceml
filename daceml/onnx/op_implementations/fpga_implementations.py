@@ -937,7 +937,7 @@ else:
 
 
 @autoregister_params(op="Conv", name="fpga_tiled")
-class FPGAIm2ColConv(ONNXForward):
+class FPGAIm2ColConv_tiled(ONNXForward):
     """
         Im2Col implementation of Convolution.
         Based on DaCe master GEMM 1D Systolic Array Implementation
@@ -995,6 +995,10 @@ class FPGAIm2ColConv(ONNXForward):
         X = in_desc_with_name(node, state, sdfg, "X")
         W = in_desc_with_name(node, state, sdfg, "W")
         Y = out_desc_with_name(node, state, sdfg, "Y")
+
+        # print(Y.__dict__)
+        # print(X.__dict__)
+        # print(W.__dict__)
 
         # TODO
         #  - The current implementation support vectorization on Y only. Support vectorization also for X
@@ -1102,15 +1106,12 @@ class FPGAIm2ColConv(ONNXForward):
         # Get descriptors and sizes
         # outer_array_a = W
         shape_a = (num_filters, filter_hx * filter_hy * num_channels)
-        strides_a = (1, 1)
 
         # outer_array_b = X
         shape_b = (filter_hx * filter_hy * num_channels, output_size_x * output_size_y)
-        strides_b = (1, 1)
 
         # outer_array_c = Y
         shape_c = Y.shape # (num_filters, output_size_x * output_size_y)
-        strides_c= (1, 1)
         print("Shape C:", shape_c)
 
         # Get types
@@ -1246,11 +1247,11 @@ to_kernel = data""")
 
             # Access mapping for Im2Col
             filter = f"n0 * {P} + n1" # directly corresponds to rows of Im2Col matrix
-            in_channel = f"k // ({filter_hx} * {filter_hy})"
-            hy = f"(k % ({filter_hx} * {filter_hy})) // {filter_hx}"
+            in_channel = f"int_floor(k,({filter_hx} * {filter_hy}))"
+            hy = f"int_floor((k % ({filter_hx} * {filter_hy})), {filter_hx})"
             hx = f"(k % ({filter_hx} * {filter_hy})) % {filter_hx}"
 
-            access = f"[{filter}, {in_channel}, {hx}, {hy}]"
+            access = f"[{filter}, {in_channel}, {hy}, {hx}]"
 
             state.add_memlet_path(mem,
                                 entry,
@@ -1315,16 +1316,16 @@ to_kernel = data""")
                                 memlet=dace.Memlet("B_dummy[0]"))
 
             # Access mapping for Im2Col
-            channel = f"k // ({filter_hx} * {filter_hy})"
+            channel = f"int_floor(k, ({filter_hx} * {filter_hy}))"
             matrix_col = f"(tm*{T} + m)" # matrix column access
-            out_y = f"{matrix_col} // {output_size_x}" # y position in output
+            out_y = f"int_floor({matrix_col}, {output_size_x})" # y position in output
             out_x = f"{matrix_col} % {output_size_x}" # x position in output
-            filter_off_y = f"(k % ({filter_hx} * {filter_hy})) // {filter_hx}"
+            filter_off_y = f"int_floor((k % ({filter_hx} * {filter_hy})), {filter_hx})"
             filter_off_x = f"(k % ({filter_hx} * {filter_hy})) % {filter_hx}"
             access_y = f"({out_y}) + {filter_off_y}"
             access_x = f"({out_x}) + {filter_off_x}"
 
-            access = f"[b, {channel}, {access_x}, {access_y}]"
+            access = f"[b, {channel}, {access_y}, {access_x}]"
 
             state.add_memlet_path(mem,
                                 entry,
@@ -1384,13 +1385,13 @@ if tm * {T} + m  < {M}  and  n0 * {P} + n1 < {N} :
             matrix_col = f"(tm*{T} + m)" # matrix column access
             out_filter = f"n0 * {P} + n1" # out_filter is equal to row of Im2Col output
             # out_y = f"({matrix_col} // {output_size_x})" # y position in output
-            out_y = f"floor({matrix_col} / {output_size_x})" # y position in output
+            out_y = f"int_floor({matrix_col}, {output_size_x})" # y position in output
             out_x = f"({matrix_col} % {output_size_x})" # x position in output
 
-            access = f"[b, {out_filter}, {out_x}, {out_y}]"
+            access = f"[b, {out_filter}, {out_y}, {out_x}]"
             # access = f"[0, 0, {out_x}, {out_y}]"
-            # access = f"[b * {Y.shape[3] * Y.shape[2] * Y.shape[1]} + {out_filter} * {Y.shape[3] * Y.shape[2]} + {out_x} * {Y.shape[3]} + {out_y}]"
-            print("Write indexing", access)
+            # fixed_access = f"[b * {Y.shape[3] * Y.shape[2] * Y.shape[1]} + {out_filter} * {Y.shape[3] * Y.shape[2]} + {out_y} * {Y.shape[3]} + {out_x}]"
+            # print("Write indexing", access)
 
             if add_bias:
                 state.add_memlet_path(mem_read,
@@ -1408,8 +1409,30 @@ if tm * {T} + m  < {M}  and  n0 * {P} + n1 < {N} :
                                 src_conn="to_memory",
                                 memlet=dace.Memlet(
                                     f"Y{access}",
+                                    # "Y",
+                                    # subset=f"{access}",
                                     dynamic=True,
                                     allow_oob=True))
+
+            # Because bugs in Sympy
+            # new_sdfg.fill_scope_connectors()
+            # print(Y.__dict__)
+            # print("mem", mem.__dict__)
+            # # for k in state._nodes.keys():
+            # #     if "write_C" in str(k) and isinstance(k, dace.sdfg.nodes.MapExit):
+            # #         print(k.__dict__)
+
+            # print()
+            # for k, v in state._edges.items():
+            #     if "write_C" in str(k) and isinstance(k._src, dace.sdfg.nodes.MapExit):
+            #         print(k.__dict__)
+            #         print(v._data.__dict__)
+            #         # v._data = dace.Memlet(
+            #         #                 f"Y{access}",
+            #         #                 dynamic=True,
+            #         #                 allow_oob=True)
+            #         print(v)
+
 
         def make_compute(sdfg, state):
 
