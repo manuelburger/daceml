@@ -478,7 +478,7 @@ class FPGAIm2ColConv(ONNXForward):
         M = output_size_y * output_size_x
 
         P = num_filters  # Num PEs  #TODO parametric
-        P = math.gcd(num_filters, 16) # restrict number of PEs per convolution
+        # P = math.gcd(num_filters, 16) # restrict number of PEs per convolution
 
         # safe delay: see explanation in the make_compute function
         L = max(11 - M, 0)
@@ -1034,10 +1034,10 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         padding = node.pads[0] # assume all same padding
         offset = 2* (filter_hx // 2 - padding) # assumes square kernel, TODO: add test
 
-        print("Shape X:", X.shape)
-        print("Shape Y:", Y.shape)
-        print("Input Size: {}x{}".format(input_size_x, input_size_y))
-        print("Output Size: {}x{}".format(output_size_x, output_size_y))
+        # print("Shape X:", X.shape)
+        # print("Shape Y:", Y.shape)
+        # print("Input Size: {}x{}".format(input_size_x, input_size_y))
+        # print("Output Size: {}x{}".format(output_size_x, output_size_y))
 
         new_sdfg = dace.SDFG("fpga_im2col_conv_tiled")
 
@@ -1065,8 +1065,8 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
         # Set number of processing elements
         P = num_filters  # Num PEs  #TODO parametric
-        P = math.gcd(num_filters, 4) # restrict number of PEs per convolution
-        P = 4
+        # P = math.gcd(num_filters, 4) # restrict number of PEs per convolution
+        # P = 4
 
         print(f"Using {P} PEs to compute {num_filters} filters; {num_filters/P} filters per PE")
 
@@ -1076,7 +1076,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
         # Set tile size; TODO: parametric or determine
         # good tile size based on input shapes
-        tile_size_m = min(16, M)
+        tile_size_m = min(256, M)
         if Y.dtype.veclen > tile_size_m:
             tile_size_m = Y.dtype.veclen
 
@@ -1117,23 +1117,23 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # Get descriptors and sizes
         # outer_array_a = W
         shape_a = (num_filters, filter_hx * filter_hy * num_channels)
-        print("Virtual weight matrix: ", shape_a)
+        print("Virtual weight matrix: ", shape_a, end="")
 
         # outer_array_b = X
         shape_b = (filter_hx * filter_hy * num_channels, output_size_x * output_size_y * Y.dtype.veclen)  # account for vectorization on Y
-        print("Virtual image matrix: ", shape_b)
+        print("; Virtual image matrix: ", shape_b)
 
         # outer_array_c = Y
         shape_c = Y.shape # (num_filters, output_size_x * output_size_y)
         shape_c = (shape_c[0], shape_c[1], shape_c[2], shape_c[3] * Y.dtype.veclen) # Fix length (vectorization)
-        print("Shape C:", shape_c)
+        print("Shape C:", shape_c, end="")
 
         # Get types
         dtype_a = W.dtype.type
         dtype_b = X.dtype.type
         dtype_c = dace.DTYPE_TO_TYPECLASS[np.result_type(dtype_a, dtype_b).type]
         shape_c = (shape_a[0], shape_b[1])
-        print("Shape C:", shape_c)
+        print("; Shape C:", shape_c)
 
         # Checks (from DaCe master GEMM)
         if W.veclen > 1:
@@ -1185,7 +1185,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         else:
             L = 0
 
-        print("Safe delay: ", L)
+        # print("Safe delay: ", L)
 
         # This implementation uses a flattened nested loop, that overlaps feeding,
         # computing and draining phases. Each PE is responsible for computing one
