@@ -414,7 +414,7 @@ class FPGAIm2ColConv(ONNXForward):
 
     @staticmethod
     def forward(node: ONNXOp, state: SDFGState,
-                sdfg: SDFG) -> typing.Union[nodes.Node, SDFG]:
+                sdfg: SDFG, pe=None) -> typing.Union[nodes.Node, SDFG]:
 
         X = in_desc_with_name(node, state, sdfg, "X")
         W = in_desc_with_name(node, state, sdfg, "W")
@@ -477,7 +477,12 @@ class FPGAIm2ColConv(ONNXForward):
         K = num_channels * filter_hx * filter_hy
         M = output_size_y * output_size_x
 
-        P = num_filters  # Num PEs  #TODO parametric
+        if not pe:
+            P = num_filters  # Num PEs  #TODO parametric
+        else:
+            P = pe
+            print(f"Expanding with {P} PEs")
+            
         # P = math.gcd(num_filters, 16) # restrict number of PEs per convolution
 
         # safe delay: see explanation in the make_compute function
@@ -997,7 +1002,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
     @staticmethod
     def forward(node: ONNXOp, state: SDFGState,
-                sdfg: SDFG) -> typing.Union[nodes.Node, SDFG]:
+                sdfg: SDFG, tiles=256, pe=None) -> typing.Union[nodes.Node, SDFG]:
 
         X = in_desc_with_name(node, state, sdfg, "X")
         W = in_desc_with_name(node, state, sdfg, "W")
@@ -1064,7 +1069,10 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         
 
         # Set number of processing elements
-        P = num_filters  # Num PEs  #TODO parametric
+        if not pe:
+            P = num_filters  # Num PEs  #TODO parametric
+        else:
+            P = pe
         # P = math.gcd(num_filters, 4) # restrict number of PEs per convolution
         # P = 4
 
@@ -1076,7 +1084,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
         # Set tile size; TODO: parametric or determine
         # good tile size based on input shapes
-        tile_size_m = min(256, M)
+        tile_size_m = min(tiles, M)
         if Y.dtype.veclen > tile_size_m:
             tile_size_m = Y.dtype.veclen
 

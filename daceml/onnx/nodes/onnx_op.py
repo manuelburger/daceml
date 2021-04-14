@@ -613,7 +613,7 @@ for schema in onnx.defs.get_all_schemas():
                 forward_impl: ONNXForward = impl
 
                 @classmethod
-                def expansion(cls, node, state, sdfg):
+                def expansion(cls, node, state, sdfg, **kwargs):
                     # scalars on gpu don't work in dace at the moment.
                     skip_due_to_scalars_on_gpu = (
                         node.schedule == dtypes.ScheduleType.GPU_Default
@@ -623,7 +623,7 @@ for schema in onnx.defs.get_all_schemas():
 
                     if cls.forward_impl.forward_can_be_applied(
                             node, state, sdfg):
-                        return cls.forward_impl.forward(node, state, sdfg)
+                        return cls.forward_impl.forward(node, state, sdfg, **kwargs)
                     else:
                         # fall back to ORT
                         log.info(
