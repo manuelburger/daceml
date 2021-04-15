@@ -1073,6 +1073,11 @@ class FPGAIm2ColConv_tiled(ONNXForward):
             P = num_filters  # Num PEs  #TODO parametric
         else:
             P = pe
+
+        # to ensure no deadlocks, see further below
+        if P > filter_hx * filter_hy * num_channels:
+            P = max(filter_hx * filter_hy * num_channels - 1, 1)
+        
         # P = math.gcd(num_filters, 4) # restrict number of PEs per convolution
         # P = 4
 
@@ -1101,12 +1106,6 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         B: the Im2Col converted input X
         C: the Bias (if applicable)
         '''
-
-    # def expansion(node,
-    #             parent_state,
-    #             parent_sdfg,
-    #             num_pes=32,
-    #             tile_size_m=None):
 
         '''
         GEMM node expansion.
@@ -1207,7 +1206,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
         if K_constant is not None and P > K_constant:
             raise ValueError(
-                f"GEMM-FPGA: Number of processing elements {P} must be smaller than the K-dimension {K}."
+                f"Conv Im2Col (tiled): Number of processing elements {P} must be smaller than the K-dimension {K}."
             )
 
         # Done above now
