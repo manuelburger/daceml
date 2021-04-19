@@ -1038,6 +1038,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         output_size_x, output_size_y = Y.shape[2:]
         padding = node.pads[0] # assume all same padding
         offset = 2* (filter_hx // 2 - padding) # assumes square kernel, TODO: add test
+        print(f"Padding: {padding}")
 
         # print("Shape X:", X.shape)
         # print("Shape Y:", Y.shape)
@@ -1095,7 +1096,10 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
         # veclen and tile size need to be compatible
         if not tile_size_m % Y.dtype.veclen == 0:
-            tile_size_m = math.gcd(tile_size_m, Y.dtype.veclen)
+            print(f"Given vector length and tile size not compatible ({tile_size_m}, {Y.dtype.veclen}), reset to", end="")
+            tile_size_m = np.lcm(tile_size_m, Y.dtype.veclen)
+            print(f"{tile_size_m}")
+
 
         # ==================================
         # Im2Col from DaCe Master GEMM
@@ -1157,8 +1161,10 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         # GEMM Parameters and checks
 
         # Note: the following sizes consider also vectorization
-        vec_width = X.dtype.veclen
+        vec_width = Y.dtype.veclen
         vec_type = dace.vector(dtype_c, vec_width)
+        base_type = Y.dtype.base_type
+        print(f"Running vector width of {vec_width}")
 
         N = shape_a[0]
         assert K == shape_a[1]
@@ -1188,7 +1194,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
         # Note: this is a platform and type dependent parameter.
         if T_constant is not None:
-            L = max(16 - T_constant, 0)
+            L = max(16 - T_constant / vec_width, 0)
         else:
             L = 0
 
@@ -1308,13 +1314,29 @@ to_kernel = data""")
                 "n": f"0:ceiling({N}/{P})", # send whole image for every row tile (block of PEs)
                 "tm": f"0:ceiling({M}/{T})", # number of tiles
                 "k": f"0:{K}",
-                "m": f"0:{T}"
+                "m0": f"0:{T}/{vec_width}"
             },
             schedule=dace.ScheduleType.FPGA_Device)
 
+
+            read_map_entry, read_map_exit = state.add_map(
+                "unrolled_reads_B", {"m1": "0:{}".format(vec_width)},
+                schedule=dace.ScheduleType.FPGA_Device,
+                unroll=True)
+
+            # local storage to accumulate data for gear-boxing
+            new_sdfg.add_array('vec_buf_B',
+                           shape=[vec_width],
+                           dtype=base_type,
+                           transient=True,
+                           storage=dace.dtypes.StorageType.FPGA_Registers)
+
+            vec_buf_B = state.add_access("vec_buf_B")
+
             # Access mapping for Im2Col
             channel = f"int_floor(k, ({filter_hx} * {filter_hy}))"
-            matrix_col = f"(tm*{T} + m)" # matrix column access
+            m = f"(m0 * {vec_width} + m1)"
+            matrix_col = f"(tm*{T} + {m})" # matrix column access
             out_y = f"int_floor({matrix_col}, {output_size_x})" # y position in output
             out_y_cpp = f"{matrix_col} / {output_size_x}" # y position in output
             out_x = f"{matrix_col} % {output_size_x}" # x position in output
@@ -1328,11 +1350,12 @@ to_kernel = data""")
             access_x = f"({out_x}) + {filter_off_x}"
 
             access = f"[b, {channel}, {access_y} - {padding}, {access_x} - {padding}]"
+            # print("Access:", access)
 
 
             # If we are out-of bound, use a dummy value
             new_sdfg.add_array("B_dummy",
-                            dtype=vec_type,
+                            dtype=base_type,
                             shape=[1],
                             transient=True,
                             storage=dace.dtypes.StorageType.FPGA_Registers)
@@ -1353,14 +1376,16 @@ to_kernel = data""")
             pipe = state.add_write("B_pipe")
             tasklet = state.add_tasklet(
                 "read_B", {"from_memory", "dummy_data"}, {"to_kernel"}, f"""\
-if tm*{T} + m < {M} and {padding_test_x} and {padding_test_y}:
+if tm*{T} + {m} < {M} and {padding_test_x} and {padding_test_y}:
     to_kernel = from_memory 
 else:
     to_kernel = dummy_data
 """)
 
+            # In the innermost map we read W=vec_width data elements and we store them into `vec_buf_B`
             state.add_memlet_path(b_dummy,
                                 entry,
+                                read_map_entry,
                                 tasklet,
                                 dst_conn="dummy_data",
                                 memlet=dace.Memlet("B_dummy[0]"))
@@ -1369,6 +1394,7 @@ else:
 
             state.add_memlet_path(mem,
                                 entry,
+                                read_map_entry,
                                 tasklet,
                                 dst_conn="from_memory",
                                 memlet=dace.Memlet(f"X{access}",
@@ -1376,10 +1402,29 @@ else:
                                                     allow_oob=True))
 
             state.add_memlet_path(tasklet,
-                                exit,
-                                pipe,
-                                src_conn="to_kernel",
-                                memlet=dace.Memlet("B_pipe[0]"))
+                        read_map_exit,
+                        vec_buf_B,
+                        src_conn="to_kernel",
+                        memlet=dace.Memlet("vec_buf_B[m1]"))
+
+            # then we transfer them to the output stream
+            copy_out_tasklet = state.add_tasklet('pack_and_copy_to_stream_B',
+                                                 {'in_con'}, {'out_con'},
+                                                 'out_con = in_con')
+
+            state.add_memlet_path(vec_buf_B,
+                                  copy_out_tasklet,
+                                  dst_conn="in_con",
+                                  memlet=dace.Memlet("vec_buf_B"))
+
+            state.add_memlet_path(copy_out_tasklet,
+                                  exit,
+                                  pipe,
+                                  src_conn="out_con",
+                                  memlet=dace.Memlet("B_pipe[0]"))
+
+
+
 
         def make_write_C(state, add_bias=True):
             # Receives the results and adds it to C
@@ -1397,24 +1442,24 @@ else:
                     "tm": f"0:ceiling({M}/{T})",
                     "n1": f"0:{P}",
                     # "m": f"0:{T}"
-                    "m": f"0:{T / Y.dtype.veclen}" # vectorization support on output
+                    "m": f"0:{T / vec_width}" # vectorization support on output
                 },
                 schedule=dace.ScheduleType.FPGA_Device)
 
             # Output vectors
-            vec_width = Y.dtype.veclen
-            read_map_entry, read_map_exit = state.add_map(
-                "unrolled_reads_PEs", {"x1": "0:{}".format(vec_width)},
-                schedule=dace.ScheduleType.FPGA_Device,
-                unroll=True)
+            # vec_width = Y.dtype.veclen
+            # read_map_entry, read_map_exit = state.add_map(
+            #     "unrolled_reads_PEs", {"x1": "0:{}".format(vec_width)},
+            #     schedule=dace.ScheduleType.FPGA_Device,
+            #     unroll=True)
 
             # local storage to accumulate data
-            new_sdfg.add_array('vec_buf',
-                           shape=[vec_width],
-                           dtype=Y.dtype.base_type,
-                           transient=True,
-                           storage=dace.dtypes.StorageType.FPGA_Registers)
-            vec_buf = state.add_access("vec_buf")
+            # new_sdfg.add_array('vec_buf',
+            #                shape=[vec_width],
+            #                dtype=Y.dtype.base_type,
+            #                transient=True,
+            #                storage=dace.dtypes.StorageType.FPGA_Registers)
+            # vec_buf = state.add_access("vec_buf")
 
             # write in memory by adding C when we copy that to memory
             # deal with out-of-bound accesses
@@ -1434,25 +1479,23 @@ else:
             # output vectors
             tasklet = state.add_tasklet(
                 "write_C", tasklet_inputs, {"to_memory"}, f"""\
-if tm * {T} + m * {Y.dtype.veclen} < {M}  and  n0 * {P} + n1 < {N} :                                               
+if tm * {T} + m * {vec_width} < {M}  and  n0 * {P} + n1 < {N} :                                               
     to_memory = from_kernel{add_prev_c}
-else:
-    to_memory = 0
 """)
 
             state.add_memlet_path(pipe,
                                 entry_map,
-                                read_map_entry, # output vectors
+                                # read_map_entry, # output vectors
                                 tasklet,
                                 dst_conn="from_kernel",
                                 memlet=dace.Memlet(f"C_pipe[{P}-1]"))
 
             # print(f"DEBUG: {output_size_x / Y.dtype.veclen}")
             # Access conversion
-            matrix_col = f"(tm*{T} + m * {Y.dtype.veclen})" # matrix column access
+            matrix_col = f"(tm*{T} + m * {vec_width})" # matrix column access
             out_filter = f"n0 * {P} + n1" # out_filter is equal to row of Im2Col output
             out_y = f"int_floor({matrix_col}, {output_size_x})" # y position in output
-            out_x = f"(({matrix_col} % {output_size_x}) / {Y.dtype.veclen})" # x position in output
+            out_x = f"(({matrix_col} % {output_size_x}) / {vec_width})" # x position in output
 
             access = f"[b, {out_filter}, {out_y}, {out_x}]"
             # print("Access:", access)
@@ -1460,7 +1503,7 @@ else:
             if add_bias:
                 state.add_memlet_path(mem_read,
                                     entry_map,
-                                    read_map_entry, # output vectors
+                                    # read_map_entry, # output vectors
                                     tasklet,
                                     dst_conn="prev_c",
                                     memlet=dace.Memlet(
@@ -1469,41 +1512,41 @@ else:
                                         allow_oob=True))
 
             # Previously no vectorization support
-            # state.add_memlet_path(tasklet,
-            #                     exit_map,
-            #                     mem,
-            #                     src_conn="to_memory",
-            #                     memlet=dace.Memlet(
-            #                         f"Y{access}",
-            #                         dynamic=True,
-            #                         allow_oob=True))
-
-            # Support writing out vectors
             state.add_memlet_path(tasklet,
-                                read_map_exit,
-                                vec_buf,
+                                exit_map,
+                                mem,
                                 src_conn="to_memory",
-                                memlet=dace.Memlet(f"vec_buf[x1]"))
-
-            copy_out_tasklet = state.add_tasklet('pack_and_write_out',
-                                                 {'in_con'}, {'out_con'},
-                                                 f"""\
-if tm * {T} + m * {Y.dtype.veclen} < {M}  and  n0 * {P} + n1 < {N} :                                               
-    out_con = in_con
-""")
-            state.add_memlet_path(vec_buf,
-                                  copy_out_tasklet,
-                                  dst_conn="in_con",
-                                  memlet=dace.Memlet("vec_buf"))
-
-            state.add_memlet_path(copy_out_tasklet,
-                                  exit_map,
-                                  mem,
-                                  src_conn="out_con",
-                                  memlet=dace.Memlet(
+                                memlet=dace.Memlet(
                                     f"Y{access}",
                                     dynamic=True,
                                     allow_oob=True))
+
+            # Support writing out vectors
+#             state.add_memlet_path(tasklet,
+#                                 read_map_exit,
+#                                 vec_buf,
+#                                 src_conn="to_memory",
+#                                 memlet=dace.Memlet(f"vec_buf[x1]"))
+
+#             copy_out_tasklet = state.add_tasklet('pack_and_write_out',
+#                                                  {'in_con'}, {'out_con'},
+#                                                  f"""\
+# if tm * {T} + m * {Y.dtype.veclen} < {M}  and  n0 * {P} + n1 < {N} :                                               
+#     out_con = in_con
+# """)
+#             state.add_memlet_path(vec_buf,
+#                                   copy_out_tasklet,
+#                                   dst_conn="in_con",
+#                                   memlet=dace.Memlet("vec_buf"))
+
+#             state.add_memlet_path(copy_out_tasklet,
+#                                   exit_map,
+#                                   mem,
+#                                   src_conn="out_con",
+#                                   memlet=dace.Memlet(
+#                                     f"Y{access}",
+#                                     dynamic=True,
+#                                     allow_oob=True))
             
 
 
@@ -1530,9 +1573,9 @@ if tm * {T} + m * {Y.dtype.veclen} < {M}  and  n0 * {P} + n1 < {N} :
                     "n0": f"0:ceiling({N}/{P})",
                     "tm": f"0:ceiling({M}/{T})",
                     "k": f"0:{K}",
-                    "m": f"0:{T} + {L}"
+                    "m": f"0:{T / vec_width} + {L}"
                 },
-                drain_size=P * T,
+                drain_size=P * (T / vec_width),
                 drain_overlap=False,
                 additional_iterators={
                     'm_drain': 0,
@@ -1639,11 +1682,11 @@ if m >= {L} and not {entry_pipeline.pipeline.drain_condition()}:
 # How: 
 # - if k = K-1 and m>=L: then the PE drains its own result
 #-  otherwise, if k_drain<p forward data coming from previous PEs (this could happens also in the drain phase)
-if((b > 0 or n0 > 0 or tm > 0)  and k_drain <p and m_drain <{T}) or  (k=={K}-1 and m>= {L}) or ({entry_pipeline.pipeline.drain_condition()} and k_drain < p): # modification to standard GEMM, also consider b
+if((b > 0 or n0 > 0 or tm > 0)  and k_drain <p and m_drain <{T / vec_width}) or  (k=={K}-1 and m>= {L}) or ({entry_pipeline.pipeline.drain_condition()} and k_drain < p): # modification to standard GEMM, also consider b
     c_pipe_out = result if (p==0 or (k_drain=={K}-1 and not {entry_pipeline.pipeline.drain_condition()})) else forward_in
 # adjust draining iterators
 if not {entry_pipeline.pipeline.drain_condition()}:
-    if m_drain >= {L} +  {T} -1:
+    if m_drain >= {L} +  {T / vec_width} -1:
         m_drain = 0
         if k_drain >= {K} - 1:
             k_drain = 0
@@ -1652,7 +1695,7 @@ if not {entry_pipeline.pipeline.drain_condition()}:
     else:
         m_drain = m_drain + 1
 else:
-    if m_drain >=  {T} -1:
+    if m_drain >=  {T / vec_width} -1:
         m_drain = 0
         if k_drain >= {K} - 1:
             k_drain = 0
