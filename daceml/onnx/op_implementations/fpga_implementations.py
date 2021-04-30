@@ -1595,7 +1595,7 @@ if tm * {T} + m * {vec_width} < {M}  and  n0 * {P} + n1 < {N} :
 
             # Note: for some of the Sacred Mysteries of Intel OpenCL Compiler (TM), if this buffer is smaller
             # than 24 floats, the II of the pipeline will be 5. Therefore we check this and in case we enlarge it
-            buffer_size = T if T_constant is None else max(T_constant, 24)
+            buffer_size = T/vec_width if T_constant is None else max(T_constant/vec_width, 24)
             sdfg.add_array("C_buffer", [buffer_size],
                         dtype=vec_type,
                         transient=True,
