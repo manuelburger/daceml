@@ -987,7 +987,11 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         #     raise ValueError("Attention, no padding support yet on tiled Im2Col Convolution")
 
         # Currently only support vectorization on Y
-        if X.dtype.veclen > 1 or W.dtype.veclen > 1:
+        # if X.dtype.veclen > 1 or W.dtype.veclen > 1:
+        #     return False
+
+        # Weights cannot be vectorized
+        if W.dtype.veclen > 1:
             return False
 
         if node.strides is not None and len(node.strides) != image_dims:
@@ -1034,7 +1038,8 @@ class FPGAIm2ColConv_tiled(ONNXForward):
         batch_size = X.shape[0]
 
         # Take output size: note, tat this accounts for vectorization (if present)
-        input_size_x, input_size_y = X.shape[2:]
+        input_size_y, input_size_x = X.shape[2:]
+        print("X shape:", X.shape)
         output_size_x, output_size_y = Y.shape[2:]
         padding = node.pads[0] # assume all same padding
         offset = 2* (filter_hx // 2 - padding) # assumes square kernel, TODO: add test
@@ -1287,7 +1292,7 @@ to_kernel = data""")
             output_size_x
 
             kernel_pad = (filter_hy // 2) * 2
-            buffer_size = ((T / output_size_x) + kernel_pad) * input_size_x # works because we currently only allow tile size to be a multiple of output_size_x
+            buffer_size = ((T / output_size_x) + kernel_pad) * (input_size_x * vec_width_in) # works because we currently only allow tile size to be a multiple of output_size_x
             buffer_size = max(buffer_size, 24) # TODO: adjust to right size to hold all rows of image within tile
             new_sdfg.add_array("img_buffer", [buffer_size],
                         dtype=base_type,
@@ -1345,15 +1350,16 @@ to_kernel = data""")
             access_x = f"({out_x}) + {filter_off_x}"
 
             access = f"[b, {channel}, {access_y} - {padding}, {access_x} - {padding}]"
-            access_flat = f"(b * {num_channels * input_size_x * input_size_y} + ({channel_cpp}) * {input_size_x * input_size_y} + ({access_y_cpp}) * {input_size_x} + ({access_x}))" # TODO finish
+            access_flat = f"(b * {num_channels * int(input_size_x * vec_width_in) * input_size_y} + ({channel_cpp}) * {int(input_size_x * vec_width_in) * input_size_y} + ({access_y_cpp}) * {int(input_size_x * vec_width_in)} + ({access_x}))"
+            access_flat_vec = f"(b * {num_channels * input_size_x * input_size_y} + ({channel_cpp}) * {input_size_x * input_size_y} + ({access_y_cpp}) * {input_size_x} + (({access_x}) / {vec_width_in}))"
 
             buf_counter = "fpga_im2col_conv_tiled_buffer_counter"
-            data_loaded_index = f"{buf_counter} * {vec_width_in}"
+            data_loaded_index = f"{buf_counter}"
 
 
-            tile_input_coverage = f"(({T} / {output_size_x}) * {input_size_x})"
+            tile_input_coverage = f"(({T} / {output_size_x}) * {input_size_x * vec_width_in})"
             print("Tile input coverage:", tile_input_coverage)
-            store_local_index = f"(({access_y_cpp}) * {input_size_x} + {access_x}) - ({tile_input_coverage} * tm)"
+            store_local_index = f"(({access_y_cpp}) * {input_size_x * vec_width_in} + {access_x}) - ({tile_input_coverage} * tm)"
             access_local_index = "(0)"
 
 
@@ -1412,39 +1418,27 @@ cur_channel = 0""")
             mem = state.add_read("X")
             pipe = state.add_write("B_pipe")
 
+            
+            # Set names accordingly for vendor
+            if dace.config.Config.get("compiler", "fpga_vendor") == "xilinx":
+                input_global = "__fpga_ONNX_input_in"
+            else:
+                input_global = "fpga_ONNX_input"
 
-#             tasklet = state.add_tasklet(
-#                 "read_B", {"from_memory", "dummy_data", "buf_local", "buf_counter"}, {"to_kernel"}, f"""\
-# if (k == 0) {{     // if first tile read from memory, TODO: boundaries
 
-#     float{"" if vec_width_in == 1 else vec_width_in} tmp;
-#     int i = 0;
+            read_vector = f"""#pragma unroll
+    for (int w = 0; w < {vec_width_in}; w++) {{
+        fpga_im2col_conv_tiled_img_buffer[store_buffer + w] = tmp[w]; // buffer image data locally
+    }}"""
+            read_scalar = "fpga_im2col_conv_tiled_img_buffer[store_buffer] = tmp; // buffer image data locally"
 
-#     while ({store_local_index} > {data_loaded_index}) {{
-#         tmp = *from_memory;
-#         fpga_im2col_conv_tiled_img_buffer[{store_local_index}] = tmp; // buffer image data locally
-#         {buf_counter} = {buf_counter} + 1
-#         i += 1
-#     }}
+            pipe_vector = f"""#pragma unroll
+    for (int w = 0; w < {vec_width_in}; w++) {{
+        to_kernel[w] = fpga_im2col_conv_tiled_img_buffer[{store_local_index} + w];
+    }}"""
+            pipe_scalar = f"to_kernel = fpga_im2col_conv_tiled_img_buffer[{store_local_index}];"
 
-#     // push to kernel, support vectorized unrolled with padding
-#     if (tm*{T} + {m} < {M}) {{
-#         to_kernel = tmp;
-#     }} else {{
-#         to_kernel = 0;
-#     }}
 
-# }} else {{ 
-
-#     // push to kernel, support vectorized unrolled with padding
-#     if (tm*{T} + {m} < {M}) {{
-#         to_kernel = fpga_im2col_conv_tiled_img_buffer[{store_local_index}];
-#     }} else {{
-#         to_kernel = 0;
-#     }}
-
-# }}
-# """, language=dace.dtypes.Language.CPP)
 
             
 
@@ -1453,9 +1447,9 @@ cur_channel = 0""")
 // Load from memory until available what is needed
 float{"" if vec_width_in == 1 else vec_width_in} tmp;
  if (k == 0 && m0 == 0) {{
-     // printf("\\n\\nNew tile\\n");
      fpga_im2col_conv_tiled_buffer_counter = 0;
      fpga_im2col_conv_tiled_current_channel = 0;
+     // printf("\\n\\nNew tile\\n");
  }}
 
 if (fpga_im2col_conv_tiled_current_channel < {channel_cpp}) {{
@@ -1464,25 +1458,46 @@ if (fpga_im2col_conv_tiled_current_channel < {channel_cpp}) {{
     // printf("\\n\\nNew channel\\n");
 }}
 
-int i = 0;
-while ({store_local_index} >= {data_loaded_index}) {{
+while ({store_local_index} + {vec_width_in - 1}  >= {data_loaded_index}) {{
+
     int diff = ({store_local_index}) - ({data_loaded_index});
-    int load_memory = {access_flat} - diff;
+    int load_memory = {access_flat_vec} - (diff / {vec_width_in});
+    if (({store_local_index}) % {vec_width_in} != 0) {{
+        // printf("read unaligend, adjust ");
+        load_memory += 1; // we try to load unaligned, load next un-cached
+    }}
     int store_buffer = {store_local_index} - diff;
-    tmp = fpga_ONNX_input[load_memory];
-    fpga_im2col_conv_tiled_img_buffer[store_buffer] = tmp; // buffer image data locally
 
-    // printf("Load from %d (%d, %d, %d, %d), store at %d (%d, -%d)\\n", load_memory, b * {num_channels * input_size_x * input_size_y}, ({channel_cpp}) * {input_size_x * input_size_y}, ({access_y_cpp}), ({access_x}), store_buffer, ({access_y_cpp} * {input_size_x} + {access_x}), ({tile_input_coverage} * tm));
+    // Load from global memory
+    tmp = {input_global}[load_memory];
 
-    {buf_counter} = {buf_counter} + 1;
-    i += 1;
+
+    {read_vector if vec_width_in > 1 else read_scalar}
+
+    //printf("[Load] Store Index: %d, Store Buffer: %d, ", ({store_local_index}), store_buffer);
+    //printf("Global Access: %d, ", load_memory);
+    //printf("Diff: %d\\n", diff);
+    // printf("[Load] from %d (%d, %d, %d, %d), store at %d (%d, -%d)\\n", load_memory, b * {num_channels * int(input_size_x * vec_width_in) * input_size_y}, ({channel_cpp}) * {int(input_size_x * vec_width_in) * input_size_y}, ({access_y_cpp}), ({access_x}), store_buffer, ({access_y_cpp} * {int(input_size_x * vec_width_in)} + {access_x}), ({tile_input_coverage} * tm));
+
+    {buf_counter} += {vec_width_in};
 }}
 
+// printf("Buffer\\n[");
+// for (int q = 0; q < 16; q++) {{
+//    printf("%f, ", fpga_im2col_conv_tiled_img_buffer[q]);
+//    if (q % 4 == 3)
+//        printf("\\n");
+//}}
+// printf("]\\n");
 
 // push to kernel, support vectorized unrolled with padding
 if (tm*{T} + {m} < {M}) {{
-    // printf("Read buffer at %d (%d, -%d) to access image at (%d, %d, %d)\\n", {store_local_index}, ({access_y_cpp} * {input_size_x} + {access_x}), ({tile_input_coverage} * tm), {channel_cpp}, {access_y_cpp}, {access_x});
-    to_kernel = fpga_im2col_conv_tiled_img_buffer[{store_local_index}];
+    // printf("Read buffer at %d (%d, -%d) to access image at (%d, %d, %d)\\n", {store_local_index}, ({access_y_cpp} * {int(input_size_x * vec_width_in)} + {access_x}), ({tile_input_coverage} * tm), {channel_cpp}, {access_y_cpp}, {access_x});
+
+    // printf("[Read] local buffer at %d to %d\\n", {store_local_index}, {store_local_index} + {vec_width_in - 1});
+
+    {pipe_vector if vec_width_in > 1 else pipe_scalar}
+
 }} else {{
     to_kernel = 0;
 }}
@@ -1517,7 +1532,7 @@ if (tm*{T} + {m} < {M}) {{
                                 dst_conn="buf_counter",
                                 memlet=dace.Memlet(f"buffer_counter[0]"))
 
-            # Memlet from local
+                        # Memlet from local
             state.add_memlet_path(curent_channel, map_entry, tasklet,
                                 dst_conn="cur_channel",
                                 memlet=dace.Memlet(f"current_channel[0]"))
