@@ -1353,7 +1353,7 @@ to_kernel = data""")
             access_flat = f"(b * {num_channels * int(input_size_x * vec_width_in) * input_size_y} + ({channel_cpp}) * {int(input_size_x * vec_width_in) * input_size_y} + ({access_y_cpp}) * {int(input_size_x * vec_width_in)} + ({access_x}))"
             access_flat_vec = f"(b * {num_channels * input_size_x * input_size_y} + ({channel_cpp}) * {input_size_x * input_size_y} + ({access_y_cpp}) * {input_size_x} + (({access_x}) / {vec_width_in}))"
 
-            buf_counter = "fpga_im2col_conv_tiled_buffer_counter"
+            buf_counter = "buf_counter"
             data_loaded_index = f"{buf_counter}"
 
 
@@ -1377,7 +1377,8 @@ to_kernel = data""")
                             shape=[1],
                             transient=True,
                             storage=dace.dtypes.StorageType.FPGA_Registers)
-            buffer_counter = state.add_access("buffer_counter")
+            buffer_counter = state.add_read("buffer_counter")
+            buffer_counter_w = state.add_write("buffer_counter")
 
             # Counter for already loaded image data
             new_sdfg.add_array("current_channel",
@@ -1385,7 +1386,8 @@ to_kernel = data""")
                             shape=[1],
                             transient=True,
                             storage=dace.dtypes.StorageType.FPGA_Registers)
-            curent_channel = state.add_access("current_channel")
+            current_channel = state.add_read("current_channel")
+            current_channel_w = state.add_write("current_channel")
 
 
             init_tasklet = state.add_tasklet("init_zero", {}, {"init_dummy", "init_counter", "cur_channel"},
@@ -1403,7 +1405,7 @@ cur_channel = 0""")
                                 src_conn="init_counter",
                                 memlet=dace.Memlet("buffer_counter[0]"))
             state.add_memlet_path(init_tasklet,
-                                curent_channel,
+                                current_channel,
                                 src_conn="cur_channel",
                                 memlet=dace.Memlet("current_channel[0]"))
 
@@ -1419,42 +1421,41 @@ cur_channel = 0""")
             pipe = state.add_write("B_pipe")
 
             
-            # Set names accordingly for vendor
-            if dace.config.Config.get("compiler", "fpga_vendor") == "xilinx":
-                input_global = "__fpga_ONNX_input_in"
-            else:
-                input_global = "fpga_ONNX_input"
-
+            # # Set names accordingly for vendor
+            # if dace.config.Config.get("compiler", "fpga_vendor") == "xilinx":
+            #     input_global = "__fpga_ONNX_input_in"
+            # else:
+            #     input_global = "fpga_ONNX_input"
 
             read_vector = f"""#pragma unroll
     for (int w = 0; w < {vec_width_in}; w++) {{
-        fpga_im2col_conv_tiled_img_buffer[store_buffer + w] = tmp[w]; // buffer image data locally
+        buf_local[store_buffer + w] = tmp[w]; // buffer image data locally
     }}"""
-            read_scalar = "fpga_im2col_conv_tiled_img_buffer[store_buffer] = tmp; // buffer image data locally"
+            read_scalar = "buf_local[store_buffer] = tmp; // buffer image data locally"
 
             pipe_vector = f"""#pragma unroll
     for (int w = 0; w < {vec_width_in}; w++) {{
-        to_kernel[w] = fpga_im2col_conv_tiled_img_buffer[{store_local_index} + w];
+        to_kernel[w] = buf_local[{store_local_index} + w];
     }}"""
-            pipe_scalar = f"to_kernel = fpga_im2col_conv_tiled_img_buffer[{store_local_index}];"
+            pipe_scalar = f"to_kernel = buf_local[{store_local_index}];"
 
 
 
             
 
             tasklet = state.add_tasklet(
-                "read_B", {"from_memory", "dummy_data", "buf_local", "buf_counter", "cur_channel"}, {"to_kernel"}, f"""\
+                "read_B", {"from_memory", "dummy_data", "buf_local", "buf_counter", "cur_channel"}, {"to_kernel", "buf_counter_w", "cur_channel_w"}, f"""\
 // Load from memory until available what is needed
 float{"" if vec_width_in == 1 else vec_width_in} tmp;
  if (k == 0 && m0 == 0) {{
-     fpga_im2col_conv_tiled_buffer_counter = 0;
-     fpga_im2col_conv_tiled_current_channel = 0;
+     buf_counter = 0;
+     cur_channel = 0;
      // printf("\\n\\nNew tile\\n");
  }}
 
-if (fpga_im2col_conv_tiled_current_channel < {channel_cpp}) {{
-    fpga_im2col_conv_tiled_current_channel += 1;
-    fpga_im2col_conv_tiled_buffer_counter = 0;
+if (cur_channel < {channel_cpp}) {{
+    cur_channel += 1;
+    buf_counter = 0;
     // printf("\\n\\nNew channel\\n");
 }}
 
@@ -1469,7 +1470,7 @@ while ({store_local_index} + {vec_width_in - 1}  >= {data_loaded_index}) {{
     int store_buffer = {store_local_index} - diff;
 
     // Load from global memory
-    tmp = {input_global}[load_memory];
+    tmp = from_memory[load_memory];
 
 
     {read_vector if vec_width_in > 1 else read_scalar}
@@ -1484,7 +1485,7 @@ while ({store_local_index} + {vec_width_in - 1}  >= {data_loaded_index}) {{
 
 // printf("Buffer\\n[");
 // for (int q = 0; q < 16; q++) {{
-//    printf("%f, ", fpga_im2col_conv_tiled_img_buffer[q]);
+//    printf("%f, ", buf_local[q]);
 //    if (q % 4 == 3)
 //        printf("\\n");
 //}}
@@ -1501,6 +1502,9 @@ if (tm*{T} + {m} < {M}) {{
 }} else {{
     to_kernel = 0;
 }}
+
+buf_counter_w = buf_counter;
+cur_channel_w = cur_channel;
 """, language=dace.dtypes.Language.CPP)
 
             # In the innermost map we read W=vec_width data elements and we store them into `vec_buf_B`
@@ -1518,23 +1522,32 @@ if (tm*{T} + {m} < {M}) {{
                                 map_entry,
                                 tasklet,
                                 dst_conn="from_memory",
-                                memlet=dace.Memlet(f"X{access}",
+                                memlet=dace.Memlet("X[0,0,0,0]", # f"X{access}",
                                                     dynamic=True,
                                                     allow_oob=True))
 
             # Memlet from local
             state.add_memlet_path(img_buffer, map_entry, tasklet,
                                 dst_conn="buf_local",
-                                memlet=dace.Memlet(f"img_buffer[0]"))
+                                memlet=dace.Memlet(f"img_buffer[0]", dynamic=True))
 
             # Memlet from local
             state.add_memlet_path(buffer_counter, map_entry, tasklet,
                                 dst_conn="buf_counter",
                                 memlet=dace.Memlet(f"buffer_counter[0]"))
 
+
+            state.add_memlet_path(tasklet, map_exit, buffer_counter_w,
+                                src_conn="buf_counter_w",
+                                memlet=dace.Memlet(f"buffer_counter[0]"))
+
                         # Memlet from local
-            state.add_memlet_path(curent_channel, map_entry, tasklet,
+            state.add_memlet_path(current_channel, map_entry, tasklet,
                                 dst_conn="cur_channel",
+                                memlet=dace.Memlet(f"current_channel[0]"))
+
+            state.add_memlet_path(tasklet, map_exit, current_channel_w,
+                                src_conn="cur_channel_w",
                                 memlet=dace.Memlet(f"current_channel[0]"))
 
 
