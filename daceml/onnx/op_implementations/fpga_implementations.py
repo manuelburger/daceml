@@ -1304,13 +1304,13 @@ to_kernel = data""")
 
 
             # local storage to accumulate data for gear-boxing
-            new_sdfg.add_array('vec_buf_B',
-                           shape=[vec_width],
-                           dtype=base_type,
-                           transient=True,
-                           storage=dace.dtypes.StorageType.FPGA_Registers)
+            # new_sdfg.add_array('vec_buf_B',
+            #                shape=[vec_width],
+            #                dtype=base_type,
+            #                transient=True,
+            #                storage=dace.dtypes.StorageType.FPGA_Registers)
 
-            vec_buf_B = state.add_access("vec_buf_B")
+            # vec_buf_B = state.add_access("vec_buf_B")
 
 
             # Also while reading B, we have to consider that T and P could not divide
@@ -1372,42 +1372,47 @@ to_kernel = data""")
             b_dummy = state.add_access("B_dummy")
 
             # Counter for already loaded image data
-            new_sdfg.add_array("buffer_counter",
-                            dtype=dace.dtypes.int32,
-                            shape=[1],
-                            transient=True,
-                            storage=dace.dtypes.StorageType.FPGA_Registers)
-            buffer_counter = state.add_read("buffer_counter")
-            buffer_counter_w = state.add_write("buffer_counter")
+            # new_sdfg.add_array("buffer_counter",
+            #                 dtype=dace.dtypes.int32,
+            #                 shape=[1],
+            #                 transient=True,
+            #                 storage=dace.dtypes.StorageType.FPGA_Registers)
+            # buffer_counter = state.add_read("buffer_counter")
+            # buffer_counter_w = state.add_write("buffer_counter")
 
-            # Counter for already loaded image data
-            new_sdfg.add_array("current_channel",
-                            dtype=dace.dtypes.int32,
-                            shape=[1],
-                            transient=True,
-                            storage=dace.dtypes.StorageType.FPGA_Registers)
-            current_channel = state.add_read("current_channel")
-            current_channel_w = state.add_write("current_channel")
+            # # Counter for already loaded image data
+            # new_sdfg.add_array("current_channel",
+            #                 dtype=dace.dtypes.int32,
+            #                 shape=[1],
+            #                 transient=True,
+            #                 storage=dace.dtypes.StorageType.FPGA_Registers)
+            # current_channel = state.add_read("current_channel")
+            # current_channel_w = state.add_write("current_channel")
 
 
-            init_tasklet = state.add_tasklet("init_zero", {}, {"init_dummy", "init_counter", "cur_channel"},
+#             init_tasklet = state.add_tasklet("init_zero", {}, {"init_dummy", "init_counter", "cur_channel"},
+#                                             """
+# init_dummy = 0
+# init_counter = 0
+# cur_channel = 0""")
+
+            init_tasklet = state.add_tasklet("init_zero", {}, {"init_dummy"},
                                             """
-init_dummy = 0
-init_counter = 0
-cur_channel = 0""")
+init_dummy = 0""")
 
             state.add_memlet_path(init_tasklet,
                                 b_dummy,
                                 src_conn="init_dummy",
                                 memlet=dace.Memlet("B_dummy[0]"))
-            state.add_memlet_path(init_tasklet,
-                                buffer_counter,
-                                src_conn="init_counter",
-                                memlet=dace.Memlet("buffer_counter[0]"))
-            state.add_memlet_path(init_tasklet,
-                                current_channel,
-                                src_conn="cur_channel",
-                                memlet=dace.Memlet("current_channel[0]"))
+            # state.add_memlet_path(init_tasklet,
+            #                     buffer_counter,
+            #                     src_conn="init_counter",
+            #                     memlet=dace.Memlet("buffer_counter[0]"))
+            # state.add_memlet_path(init_tasklet,
+            #                     current_channel,
+            #                     src_conn="cur_channel",
+            #                     memlet=dace.Memlet("current_channel[0]"))
+
 
             # Padding out of image test
             padding_test_x = f"({access_x} - {padding} < {output_size_x} + {offset} and {access_x}  - {padding} >= 0)"
@@ -1443,68 +1448,110 @@ cur_channel = 0""")
 
             
 
+#             tasklet = state.add_tasklet(
+#                 "read_B", {"from_memory", "dummy_data", "buf_local", "buf_counter", "cur_channel"}, {"to_kernel", "buf_counter_w", "cur_channel_w"}, f"""\
+# // Load from memory until available what is needed
+# float{"" if vec_width_in == 1 else vec_width_in} tmp;
+#  if (k == 0 && m0 == 0) {{
+#      buf_counter = 0;
+#      cur_channel = 0;
+#      // printf("\\n\\nNew tile\\n");
+#  }}
+
+# if (cur_channel < {channel_cpp}) {{
+#     cur_channel += 1;
+#     buf_counter = 0;
+#     // printf("\\n\\nNew channel\\n");
+# }}
+
+# #pragma loop_coalesce
+# while ({store_local_index} + {vec_width_in - 1}  >= {data_loaded_index}) {{
+
+#     int diff = ({store_local_index}) - ({data_loaded_index});
+#     int load_memory = {access_flat_vec} - (diff / {vec_width_in});
+#     if (({store_local_index}) % {vec_width_in} != 0) {{
+#         // printf("read unaligend, adjust ");
+#         load_memory += 1; // we try to load unaligned, load next un-cached
+#     }}
+#     int store_buffer = {store_local_index} - diff;
+
+#     // Load from global memory
+#     tmp = from_memory[load_memory];
+
+
+#     {read_vector if vec_width_in > 1 else read_scalar}
+
+#     //printf("[Load] Store Index: %d, Store Buffer: %d, ", ({store_local_index}), store_buffer);
+#     //printf("Global Access: %d, ", load_memory);
+#     //printf("Diff: %d\\n", diff);
+#     // printf("[Load] from %d (%d, %d, %d, %d), store at %d (%d, -%d)\\n", load_memory, b * {num_channels * int(input_size_x * vec_width_in) * input_size_y}, ({channel_cpp}) * {int(input_size_x * vec_width_in) * input_size_y}, ({access_y_cpp}), ({access_x}), store_buffer, ({access_y_cpp} * {int(input_size_x * vec_width_in)} + {access_x}), ({tile_input_coverage} * tm));
+
+#     {buf_counter} += {vec_width_in};
+# }}
+
+# // push to kernel, support vectorized unrolled with padding
+# if (tm*{T} + {m} < {M}) {{
+#     // printf("Read buffer at %d (%d, -%d) to access image at (%d, %d, %d)\\n", {store_local_index}, ({access_y_cpp} * {int(input_size_x * vec_width_in)} + {access_x}), ({tile_input_coverage} * tm), {channel_cpp}, {access_y_cpp}, {access_x});
+
+#     // printf("[Read] local buffer at %d to %d\\n", {store_local_index}, {store_local_index} + {vec_width_in - 1});
+
+#     {pipe_vector if vec_width_in > 1 else pipe_scalar}
+
+# }} else {{
+#     to_kernel = 0;
+# }}
+
+# buf_counter_w = buf_counter;
+# cur_channel_w = cur_channel;
+# """, language=dace.dtypes.Language.CPP)
+
+
+
+
             tasklet = state.add_tasklet(
-                "read_B", {"from_memory", "dummy_data", "buf_local", "buf_counter", "cur_channel"}, {"to_kernel", "buf_counter_w", "cur_channel_w"}, f"""\
+                "read_B", {"from_memory", "dummy_data", "buf_local"}, {"to_kernel"}, f"""\
 // Load from memory until available what is needed
 float{"" if vec_width_in == 1 else vec_width_in} tmp;
- if (k == 0 && m0 == 0) {{
-     buf_counter = 0;
-     cur_channel = 0;
-     // printf("\\n\\nNew tile\\n");
- }}
 
-if (cur_channel < {channel_cpp}) {{
-    cur_channel += 1;
-    buf_counter = 0;
-    // printf("\\n\\nNew channel\\n");
-}}
 
-while ({store_local_index} + {vec_width_in - 1}  >= {data_loaded_index}) {{
+// Always load from memory unless out-of-bounds
+if (tm*{T} + {m} < {M}) {{
 
-    int diff = ({store_local_index}) - ({data_loaded_index});
-    int load_memory = {access_flat_vec} - (diff / {vec_width_in});
-    if (({store_local_index}) % {vec_width_in} != 0) {{
-        // printf("read unaligend, adjust ");
-        load_memory += 1; // we try to load unaligned, load next un-cached
+    // Global memory access
+    int load_memory = {access_flat_vec};
+    // Local buffer access
+    int store_buffer = {store_local_index};
+
+    // Adjust if unaligned
+    int alignment = store_buffer % {vec_width_in};
+    if (alignment != 0) {{
+        load_memory += 1;
+        store_buffer += ({vec_width_in} - alignment);
     }}
-    int store_buffer = {store_local_index} - diff;
+
 
     // Load from global memory
     tmp = from_memory[load_memory];
 
-
+    // Unpack vector into local buffer
     {read_vector if vec_width_in > 1 else read_scalar}
 
-    //printf("[Load] Store Index: %d, Store Buffer: %d, ", ({store_local_index}), store_buffer);
-    //printf("Global Access: %d, ", load_memory);
-    //printf("Diff: %d\\n", diff);
-    // printf("[Load] from %d (%d, %d, %d, %d), store at %d (%d, -%d)\\n", load_memory, b * {num_channels * int(input_size_x * vec_width_in) * input_size_y}, ({channel_cpp}) * {int(input_size_x * vec_width_in) * input_size_y}, ({access_y_cpp}), ({access_x}), store_buffer, ({access_y_cpp} * {int(input_size_x * vec_width_in)} + {access_x}), ({tile_input_coverage} * tm));
+    // printf("[Load] Store Index: %d, Store Buffer: %d, ", ({store_local_index}), store_buffer);
+    // printf("Global Access: %d\\n", load_memory);
 
-    {buf_counter} += {vec_width_in};
 }}
 
-// printf("Buffer\\n[");
-// for (int q = 0; q < 16; q++) {{
-//    printf("%f, ", buf_local[q]);
-//    if (q % 4 == 3)
-//        printf("\\n");
-//}}
-// printf("]\\n");
-
-// push to kernel, support vectorized unrolled with padding
+// Stream to kernel from local buffer
 if (tm*{T} + {m} < {M}) {{
-    // printf("Read buffer at %d (%d, -%d) to access image at (%d, %d, %d)\\n", {store_local_index}, ({access_y_cpp} * {int(input_size_x * vec_width_in)} + {access_x}), ({tile_input_coverage} * tm), {channel_cpp}, {access_y_cpp}, {access_x});
 
     // printf("[Read] local buffer at %d to %d\\n", {store_local_index}, {store_local_index} + {vec_width_in - 1});
 
+    // Pack output vector
     {pipe_vector if vec_width_in > 1 else pipe_scalar}
 
 }} else {{
     to_kernel = 0;
 }}
-
-buf_counter_w = buf_counter;
-cur_channel_w = cur_channel;
 """, language=dace.dtypes.Language.CPP)
 
             # In the innermost map we read W=vec_width data elements and we store them into `vec_buf_B`
@@ -1532,23 +1579,30 @@ cur_channel_w = cur_channel;
                                 memlet=dace.Memlet(f"img_buffer[0]", dynamic=True))
 
             # Memlet from local
-            state.add_memlet_path(buffer_counter, map_entry, tasklet,
-                                dst_conn="buf_counter",
-                                memlet=dace.Memlet(f"buffer_counter[0]"))
+            # state.add_memlet_path(buffer_counter, map_entry, tasklet,
+            #                     dst_conn="buf_counter",
+            #                     memlet=dace.Memlet(f"buffer_counter[0]"))
 
 
-            state.add_memlet_path(tasklet, map_exit, buffer_counter_w,
-                                src_conn="buf_counter_w",
-                                memlet=dace.Memlet(f"buffer_counter[0]"))
+            # state.add_memlet_path(tasklet, map_exit, buffer_counter_w,
+            #                     src_conn="buf_counter_w",
+            #                     memlet=dace.Memlet(f"buffer_counter[0]"))
 
-                        # Memlet from local
-            state.add_memlet_path(current_channel, map_entry, tasklet,
-                                dst_conn="cur_channel",
-                                memlet=dace.Memlet(f"current_channel[0]"))
+            #             # Memlet from local
+            # state.add_memlet_path(current_channel, map_entry, tasklet,
+            #                     dst_conn="cur_channel",
+            #                     memlet=dace.Memlet(f"current_channel[0]"))
 
-            state.add_memlet_path(tasklet, map_exit, current_channel_w,
-                                src_conn="cur_channel_w",
-                                memlet=dace.Memlet(f"current_channel[0]"))
+            # state.add_memlet_path(tasklet, map_exit, current_channel_w,
+            #                     src_conn="cur_channel_w",
+            #                     memlet=dace.Memlet(f"current_channel[0]"))
+
+
+            state.add_memlet_path(tasklet,
+                        map_exit,
+                        pipe,
+                        src_conn="to_kernel",
+                        memlet=dace.Memlet("B_pipe[0]"))
 
 
             # Memlet to local
@@ -1559,26 +1613,26 @@ cur_channel_w = cur_channel;
             #                     memlet=dace.Memlet(f"img_buffer[0]", dynamic=True))
 
 
-            state.add_memlet_path(tasklet,
-                        vec_buf_B,
-                        src_conn="to_kernel",
-                        memlet=dace.Memlet("vec_buf_B"))
+            # state.add_memlet_path(tasklet,
+            #             vec_buf_B,
+            #             src_conn="to_kernel",
+            #             memlet=dace.Memlet("vec_buf_B"))
 
-            # then we transfer them to the output stream
-            copy_out_tasklet = state.add_tasklet('pack_and_copy_to_stream_B',
-                                                 {'in_con'}, {'out_con'},
-                                                 'out_con = in_con')
+            # # then we transfer them to the output stream
+            # copy_out_tasklet = state.add_tasklet('pack_and_copy_to_stream_B',
+            #                                      {'in_con'}, {'out_con'},
+            #                                      'out_con = in_con')
 
-            state.add_memlet_path(vec_buf_B,
-                                  copy_out_tasklet,
-                                  dst_conn="in_con",
-                                  memlet=dace.Memlet("vec_buf_B"))
+            # state.add_memlet_path(vec_buf_B,
+            #                       copy_out_tasklet,
+            #                       dst_conn="in_con",
+            #                       memlet=dace.Memlet("vec_buf_B"))
 
-            state.add_memlet_path(copy_out_tasklet,
-                                  map_exit,
-                                  pipe,
-                                  src_conn="out_con",
-                                  memlet=dace.Memlet("B_pipe[0]"))
+            # state.add_memlet_path(copy_out_tasklet,
+            #                       map_exit,
+            #                       pipe,
+            #                       src_conn="out_con",
+            #                       memlet=dace.Memlet("B_pipe[0]"))
 
 
 
