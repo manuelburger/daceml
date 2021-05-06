@@ -1299,8 +1299,8 @@ to_kernel = data""")
                         transient=True,
                         storage=dace.dtypes.StorageType.FPGA_Local)
 
-            img_buffer = state.add_access("img_buffer")
-            # img_buffer_write = state.add_write("img_buffer")
+            img_buffer = state.add_read("img_buffer")
+            img_buffer_write = state.add_write("img_buffer")
 
 
             # local storage to accumulate data for gear-boxing
@@ -1432,18 +1432,6 @@ init_dummy = 0""")
             # else:
             #     input_global = "fpga_ONNX_input"
 
-            read_vector = f"""#pragma unroll
-    for (int w = 0; w < {vec_width_in}; w++) {{
-        buf_local[store_buffer + w] = tmp[w]; // buffer image data locally
-    }}"""
-            read_scalar = "buf_local[store_buffer] = tmp; // buffer image data locally"
-
-            pipe_vector = f"""#pragma unroll
-    for (int w = 0; w < {vec_width_in}; w++) {{
-        to_kernel[w] = buf_local[{store_local_index} + w];
-    }}"""
-            pipe_scalar = f"to_kernel = buf_local[{store_local_index}];"
-
 
 
             
@@ -1506,12 +1494,30 @@ init_dummy = 0""")
 # """, language=dace.dtypes.Language.CPP)
 
 
+            xilinx = True if dace.config.Config.get("compiler", "fpga_vendor") == "xilinx" else False
+            if xilinx:
+                vector_type = f"dace::vec<float, {vec_width_in}>"
+            else:
+                vector_type = f"float{'' if vec_width_in == 1 else vec_width_in}"
+
+
+            read_vector = f"""#pragma {"HLS " if xilinx else ""}unroll
+    for (int w = 0; w < {vec_width_in}; w++) {{
+        buf_local_out[store_buffer + w] = tmp[w]; // buffer image data locally
+    }}"""
+            read_scalar = "buf_local[store_buffer] = tmp; // buffer image data locally"
+
+            pipe_vector = f"""#pragma {"HLS " if xilinx else ""}unroll
+    for (int w = 0; w < {vec_width_in}; w++) {{
+        to_kernel[w] = buf_local[{store_local_index} + w];
+    }}"""
+            pipe_scalar = f"to_kernel = buf_local[{store_local_index}];"
 
 
             tasklet = state.add_tasklet(
-                "read_B", {"from_memory", "dummy_data", "buf_local"}, {"to_kernel"}, f"""\
+                "read_B", {"from_memory", "dummy_data", "buf_local"}, {"to_kernel", "buf_local_out"}, f"""\
 // Load from memory until available what is needed
-float{"" if vec_width_in == 1 else vec_width_in} tmp;
+{vector_type} tmp;
 
 
 // Always load from memory unless out-of-bounds
@@ -1574,6 +1580,11 @@ if (tm*{T} + {m} < {M}) {{
                                                     allow_oob=True))
 
             # Memlet from local
+            state.add_memlet_path(tasklet, map_exit, img_buffer_write,
+                                src_conn="buf_local_out",
+                                memlet=dace.Memlet(f"img_buffer[0]", dynamic=True))
+
+            
             state.add_memlet_path(img_buffer, map_entry, tasklet,
                                 dst_conn="buf_local",
                                 memlet=dace.Memlet(f"img_buffer[0]", dynamic=True))
@@ -1602,7 +1613,7 @@ if (tm*{T} + {m} < {M}) {{
                         map_exit,
                         pipe,
                         src_conn="to_kernel",
-                        memlet=dace.Memlet("B_pipe[0]"))
+                        memlet=dace.Memlet("B_pipe[0]", dynamic=xilinx))
 
 
             # Memlet to local
@@ -1613,6 +1624,7 @@ if (tm*{T} + {m} < {M}) {{
             #                     memlet=dace.Memlet(f"img_buffer[0]", dynamic=True))
 
 
+            # A bit useless, but was necesary to generate for Xilinx, shrug
             # state.add_memlet_path(tasklet,
             #             vec_buf_B,
             #             src_conn="to_kernel",

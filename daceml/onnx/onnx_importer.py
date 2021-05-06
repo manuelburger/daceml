@@ -17,7 +17,7 @@ from dace.sdfg import SDFG, SDFGState
 from dace.dtypes import AccessType, StorageType, AllocationLifetime
 import dace.sdfg.nodes as nd
 from dace.symbolic import pystr_to_symbolic
-from dace.transformation import auto_optimize
+from dace.transformation.auto import auto_optimize
 
 from daceml.onnx.shape_inference import shape_inference
 from daceml.onnx.converters import convert_attribute_proto, onnx_tensor_type_to_typeclass, clean_onnx_name
