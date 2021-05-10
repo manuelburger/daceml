@@ -1301,7 +1301,8 @@ to_kernel = data""")
                         storage=dace.dtypes.StorageType.FPGA_Local)
 
             img_buffer = state.add_access("img_buffer")
-            img_buffer_dummy = state.add_write("img_buffer")
+            img_buffer_write = state.add_write("img_buffer")
+            img_buffer_read = state.add_read("img_buffer")
 
 
             # local vector buffer to hold vector data from global memory
@@ -1312,7 +1313,7 @@ to_kernel = data""")
                            storage=dace.dtypes.StorageType.FPGA_Registers)
 
             vec_buf_B = state.add_access("vec_buf_B")
-            vec_buf_B_dummy = state.add_write("vec_buf_B")
+            # vec_buf_B_dummy = state.add_write("vec_buf_B")
 
             new_sdfg.add_array("vec_buf_out",
                            shape=[vec_width_in],
@@ -1321,7 +1322,15 @@ to_kernel = data""")
                            storage=dace.dtypes.StorageType.FPGA_Registers)
 
             vec_buf_out = state.add_access("vec_buf_out")
-            vec_buf_out_dummy = state.add_write("vec_buf_out")
+            # vec_buf_out_dummy = state.add_write("vec_buf_out")
+
+            # new_sdfg.add_array("vec_buf_in",
+            #                shape=[1],
+            #                dtype=dace.vector(base_type, vec_width_in),
+            #                transient=True,
+            #                storage=dace.dtypes.StorageType.FPGA_Registers)
+
+            # vec_buf_in = state.add_access("vec_buf_in")
 
 
             # Also while reading B, we have to consider that T and P could not divide
@@ -1413,7 +1422,7 @@ init_dummy = 0""")
             read_global_task = state.add_tasklet(
                 "read_global",
                 {"aligned_read", "unaligned_read"},
-                {"buf", "dummy_connection"},
+                {"buf" : dace.vector(base_type, vec_width_in)}, # , "dummy_connection"},
 f"""
 # only read if within bounds
 if (tm*{T} + {m} < {M}):
@@ -1457,25 +1466,48 @@ if (tm*{T} + {m} < {M}):
             # Store in Vector Buffer
             state.add_memlet_path(
                 read_global_task,
-                vec_buf_B,
+                vec_buf_B, # vec_buf_in, vec_buf_B,
                 src_conn="buf",
                 memlet=dace.Memlet(
-                    "vec_buf_B",
-                    dynamic=True
+                    "vec_buf_B", # "vec_buf_in", # "vec_buf_B",
                 )
             )
 
             # Dummy connection to make vec buffer global across iterations
-            state.add_memlet_path(
-                read_global_task,
-                map_exit,
-                vec_buf_B_dummy,
-                src_conn="dummy_connection",
-                memlet=dace.Memlet(
-                    f"vec_buf_B[0]",
-                    dynamic=True,
-                )
-            )
+            # state.add_memlet_path(
+            #     read_global_task,
+            #     map_exit,
+            #     vec_buf_B_dummy,
+            #     src_conn="dummy_connection",
+            #     memlet=dace.Memlet(
+            #         f"vec_buf_B[0]",
+            #         dynamic=True,
+            #     )
+            # )
+
+            # ----------------------------------------
+            # unpack vector
+            # ----------------------------------------
+            # unpack_task = state.add_tasklet(
+            #     "unpacking_vector",
+            #     {"in_con"},
+            #     {"out_con" : dace.vector(base_type, vec_width_in)},
+            #     "out_con = in_con"
+            # )
+
+            # state.add_memlet_path(
+            #     vec_buf_in,
+            #     unpack_task,
+            #     dst_conn="in_con",
+            #     memlet=dace.Memlet("vec_buf_in" )
+            # )
+
+            # state.add_memlet_path(
+            #     unpack_task,
+            #     vec_buf_B,
+            #     src_conn="out_con",
+            #     memlet=dace.Memlet("vec_buf_B")
+            # )
 
 
             # ----------------------------------------
@@ -1522,7 +1554,8 @@ if (tm*{T} + {m} < {M}):
             state.add_memlet_path(
                 copy_to_local_task,
                 vector_map_exit,
-                img_buffer,
+                map_exit,
+                img_buffer_write, # use iteration global write buffer
                 src_conn="aligned_write",
                 memlet=dace.Memlet(
                     f"img_buffer[({store_local_index}) + m1]",
@@ -1534,7 +1567,8 @@ if (tm*{T} + {m} < {M}):
             state.add_memlet_path(
                 copy_to_local_task,
                 vector_map_exit,
-                img_buffer,
+                map_exit,
+                img_buffer_write, # use iteration global write
                 src_conn="unaligned_write",
                 memlet=dace.Memlet(
                     f"img_buffer[(({store_local_index}) + ({vec_width_in} - (({store_local_index}) % {vec_width_in}))) + m1]",
@@ -1542,12 +1576,11 @@ if (tm*{T} + {m} < {M}):
                 )
             )
 
-            # Dummy connection to make img buffer global across iterations
+            # Dummy connection to connect graph
             state.add_memlet_path(
                 copy_to_local_task,
                 vector_map_exit,
-                map_exit,
-                img_buffer_dummy,
+                img_buffer, # use dummy connector to build graph flow
                 src_conn="dummy_connection",
                 memlet=dace.Memlet(
                     f"img_buffer[0]",
@@ -1561,15 +1594,15 @@ if (tm*{T} + {m} < {M}):
             # ----------------------------------------
             write_pipe_task = state.add_tasklet(
                 "write_pipe",
-                {"buf"},
-                {"to_kernel", "dummy_connection"},
+                {"buf", "dummy_value", "dummy_connection"},
+                {"to_kernel"}, # , "dummy_connection"},
                 f"""
 # only write if within bounds
 if (tm*{T} + {m} < {M}):
     to_kernel = buf
     
 else:
-    to_kernel = 0
+    to_kernel = dummy_value
                 """
             )
 
@@ -1581,7 +1614,8 @@ else:
             )
 
             state.add_memlet_path(
-                img_buffer,
+                img_buffer_read,
+                map_entry,
                 vector_out_entry,
                 write_pipe_task,
                 dst_conn="buf",
@@ -1589,6 +1623,15 @@ else:
                     f"img_buffer[({store_local_index}) + m1]",
                     dynamic=True,
                 )
+            )
+
+            state.add_memlet_path(
+                b_dummy,
+                map_entry,
+                vector_out_entry,
+                write_pipe_task,
+                dst_conn="dummy_value",
+                memlet=dace.Memlet("B_dummy[0]")
             )
 
             state.add_memlet_path(
@@ -1603,13 +1646,12 @@ else:
 
             # Dummy connection to make vec buffer global across iterations
             state.add_memlet_path(
+                img_buffer,
+                vector_out_entry,
                 write_pipe_task,
-                vector_out_exit,
-                map_exit,
-                vec_buf_out_dummy,
-                src_conn="dummy_connection",
+                dst_conn="dummy_connection",
                 memlet=dace.Memlet(
-                    f"vec_buf_out[0]",
+                    f"img_buffer[0]",
                     dynamic=True,
                 )
             )
@@ -1618,13 +1660,18 @@ else:
             # ----------------------------------------
             # write to output vector buffer
             # ----------------------------------------
-            write_out_task = state.add_tasklet("write_out", {"in_con"}, {"out_con"}, "out_con = in_con")
+            write_out_task = state.add_tasklet(
+                "write_out",
+                {"in_con": dace.vector(base_type, vec_width_in)},
+                {"out_con"},
+                "out_con = in_con"
+            )
 
             state.add_memlet_path(
                 vec_buf_out,
                 write_out_task,
                 dst_conn="in_con",
-                memlet=dace.Memlet("vec_buf_out")
+                memlet=dace.Memlet("vec_buf_out" )
             )
 
 
