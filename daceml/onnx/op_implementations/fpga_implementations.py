@@ -1300,7 +1300,7 @@ to_kernel = data""")
                         transient=True,
                         storage=dace.dtypes.StorageType.FPGA_Local)
 
-            img_buffer = state.add_access("img_buffer")
+            # img_buffer = state.add_access("img_buffer")
             img_buffer_write = state.add_write("img_buffer")
             img_buffer_read = state.add_read("img_buffer")
 
@@ -1315,6 +1315,8 @@ to_kernel = data""")
             vec_buf_B = state.add_access("vec_buf_B")
             # vec_buf_B_dummy = state.add_write("vec_buf_B")
 
+
+            # local vector buffer to hold data to send to stream
             new_sdfg.add_array("vec_buf_out",
                            shape=[vec_width_in],
                            dtype=base_type,
@@ -1516,7 +1518,7 @@ if (tm*{T} + {m} < {M}):
             copy_to_local_task = state.add_tasklet(
                 "move_to_local",
                 {"buf"},
-                {"aligned_write", "unaligned_write", "dummy_connection"},
+                {"aligned_write", "unaligned_write"}, # , "dummy_connection"},
 f"""
 # only write if within bounds
 if (tm*{T} + {m} < {M}):
@@ -1577,16 +1579,16 @@ if (tm*{T} + {m} < {M}):
             )
 
             # Dummy connection to connect graph
-            state.add_memlet_path(
-                copy_to_local_task,
-                vector_map_exit,
-                img_buffer, # use dummy connector to build graph flow
-                src_conn="dummy_connection",
-                memlet=dace.Memlet(
-                    f"img_buffer[0]",
-                    dynamic=True,
-                )
-            )
+            # state.add_memlet_path(
+            #     copy_to_local_task,
+            #     vector_map_exit,
+            #     img_buffer, # use dummy connector to build graph flow
+            #     src_conn="dummy_connection",
+            #     memlet=dace.Memlet(
+            #         f"img_buffer[0]",
+            #         dynamic=True,
+            #     )
+            # )
 
 
             # ----------------------------------------
@@ -1594,15 +1596,32 @@ if (tm*{T} + {m} < {M}):
             # ----------------------------------------
             write_pipe_task = state.add_tasklet(
                 "write_pipe",
-                {"buf", "dummy_value", "dummy_connection"},
+                {"buf", "vector", "vector_unaligned", "dummy_value"}, # dummy_connection
                 {"to_kernel"}, # , "dummy_connection"},
                 f"""
-# only write if within bounds
+# only write data if within bounds
 if (tm*{T} + {m} < {M}):
-    to_kernel = buf
+
+    alignment = (({store_local_index_cpp}) % {vec_width_in})
+
+    # write aligned from current cycle vector
+    if alignment == 0:
+        to_kernel = vector
+
+    # unaligned, mix of current vector (next aligned) and buffered data (prev. aligned)
+    else:
+        
+        # read from next aligned i.e. vector
+        if m1 > {vec_width_in} - alignment:
+            to_kernel = vector_unaligned
+        else:
+            to_kernel = buf
+
     
 else:
     to_kernel = dummy_value
+
+
                 """
             )
 
@@ -1626,6 +1645,26 @@ else:
             )
 
             state.add_memlet_path(
+                vec_buf_B,
+                vector_out_entry,
+                write_pipe_task,
+                dst_conn="vector",
+                memlet=dace.Memlet(
+                    f"vec_buf_B[m1]"
+                )
+            )
+
+            state.add_memlet_path(
+                vec_buf_B,
+                vector_out_entry,
+                write_pipe_task,
+                dst_conn="vector_unaligned",
+                memlet=dace.Memlet(
+                    f"vec_buf_B[(({store_local_index}) + m1) % {vec_width_in}]"
+                )
+            )
+
+            state.add_memlet_path(
                 b_dummy,
                 map_entry,
                 vector_out_entry,
@@ -1645,16 +1684,16 @@ else:
             )
 
             # Dummy connection to make vec buffer global across iterations
-            state.add_memlet_path(
-                img_buffer,
-                vector_out_entry,
-                write_pipe_task,
-                dst_conn="dummy_connection",
-                memlet=dace.Memlet(
-                    f"img_buffer[0]",
-                    dynamic=True,
-                )
-            )
+            # state.add_memlet_path(
+            #     img_buffer,
+            #     vector_out_entry,
+            #     write_pipe_task,
+            #     dst_conn="dummy_connection",
+            #     memlet=dace.Memlet(
+            #         f"img_buffer[0]",
+            #         dynamic=True,
+            #     )
+            # )
 
 
             # ----------------------------------------
