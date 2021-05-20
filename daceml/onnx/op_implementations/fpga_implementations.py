@@ -2351,8 +2351,11 @@ class FPGAMaxPool2D(ONNXForward):
         X = in_desc_with_name(node, state, sdfg, "X")
         Y = out_desc_with_name(node, state, sdfg, "Y")
 
-        if Y.veclen != 1:  #NYI
-            return False
+        # if Y.veclen != 1:  #NYI
+        #     return False
+
+        if Y.veclen != 1:  # if output vectorized must match
+            return X.veclen == Y.veclen
 
         if "Indices" in {e.src_conn for e in state.out_edges(node)}:
             return False
@@ -2440,6 +2443,17 @@ class FPGAMaxPool2D(ONNXForward):
                            storage=dace.dtypes.StorageType.FPGA_Registers)
         # temporary storage for unpacked vector data type
 
+        if Y.veclen > 1:
+            new_sdfg.add_array('vec_data_out',
+                        shape=[
+                            vec_width,
+                        ],
+                        dtype=Y.dtype.type,
+                        transient=True,
+                        storage=dace.dtypes.StorageType.FPGA_Registers)
+            # temporary storage for unpacked output vector
+            vec_out = new_state.add_access("vec_data_out")
+
         # the outer map loops over every entry in the input array
         # (useful also in the case of streaming input, we can't skip data
         # Note that `input_size_width` accounts for vectorization
@@ -2450,7 +2464,7 @@ class FPGAMaxPool2D(ONNXForward):
                  in_y="0:{}".format(input_size_height),
                  in_x="0:{}".format(input_size_width)))
 
-        # if vec_width >1 this will deal with it
+        # if vec_width > 1 this will deal with it
         vect_me, vect_mx = new_state.add_map('vect_pool_map',
                                              dict(w="0:{}".format(vec_width)),
                                              unroll=True)
@@ -2475,7 +2489,7 @@ class FPGAMaxPool2D(ONNXForward):
             code="if hx == 0 and hy == 0: max_in = {}\n"  #init
             "max_out = float(max(max_in, image_in))\n"
             "if hy == {} - 1 and hx == {} -1 and  in_y % {} == {} - 1 and (in_x *{}+w) % {} == {} -1: output = max_out"
-            .format(dtypes.min_value(Y.dtype), filter_height, filter_width,
+            .format(dtypes.min_value(Y.dtype.base_type), filter_height, filter_width,
                     filter_height, filter_height, vec_width, filter_height,
                     filter_width))
 
@@ -2539,24 +2553,62 @@ class FPGAMaxPool2D(ONNXForward):
                                   memlet=dace.Memlet("max_res[0]"))
         #empty memlet
         new_state.add_memlet_path(write_max_res, vect_mx, memlet=dace.Memlet())
+
         #Attention, the storing location must take into account that the input was vectorized
-        if vec_width != 1:
+        if vec_width != 1 and Y.veclen == 1:
             y_memlet = dace.Memlet(
-                f"Y[b,c, in_y//{filter_height}, (in_x*{vec_width}+w)//{filter_width}]"
+                f"Y[b,c, int_floor(in_y, {filter_height}), int_floor((in_x*{vec_width}+w), {filter_width})]", allow_oob=True
             )
         else:
             y_memlet = dace.Memlet(
-                f"Y[b,c, in_y//{filter_height}, in_x//{filter_width}]")
+                f"Y[b,c, int_floor(in_y, {filter_height}), int_floor(in_x, {filter_width})]", allow_oob=True)
         # dynamic memlet (to access only when needed) from compute tasklet to out image
         # Attention: use propagate=False otherwise it does not validate
-        new_state.add_memlet_path(compute_tasklet,
-                                  inner_mx,
-                                  vect_mx,
-                                  outer_mx,
-                                  write_Y,
-                                  src_conn="output",
-                                  memlet=y_memlet,
-                                  propagate=True)
+
+        if Y.veclen == 1:
+            new_state.add_memlet_path(compute_tasklet,
+                                    inner_mx,
+                                    vect_mx,
+                                    outer_mx,
+                                    write_Y,
+                                    src_conn="output",
+                                    memlet=y_memlet,
+                                    propagate=True,
+                                    )
+        else:
+
+            new_state.add_memlet_path(
+                compute_tasklet,
+                inner_mx,
+                vect_mx,
+                vec_out,
+                src_conn="output",
+                memlet=dace.Memlet(f"vec_data_out[w]")
+            )
+
+            to_memory_task = new_state.add_tasklet(
+                "to_memory_task",
+                inputs={"vec"},
+                outputs={"to_mem"},
+                code="to_mem = vec"
+            )
+
+            new_state.add_memlet_path(
+                vec_out,
+                to_memory_task,
+                dst_conn="vec",
+                memlet=dace.Memlet(f"vec_data_out")
+            )
+
+            new_state.add_memlet_path(
+                to_memory_task,
+                outer_mx,
+                write_Y,
+                src_conn="to_mem",
+                memlet=y_memlet
+            )
+
+
 
         new_sdfg.fill_scope_connectors()
         return new_sdfg
