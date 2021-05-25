@@ -2561,7 +2561,9 @@ class FPGAMaxPool2D(ONNXForward):
             )
         else:
             y_memlet = dace.Memlet(
-                f"Y[b,c, int_floor(in_y, {filter_height}), int_floor(in_x, {filter_width})]", allow_oob=True)
+                f"Y[b,c, int_floor(in_y, {filter_height}), int_floor(in_x, {filter_width})]", allow_oob=True, 
+                dynamic=True)
+
         # dynamic memlet (to access only when needed) from compute tasklet to out image
         # Attention: use propagate=False otherwise it does not validate
 
@@ -2583,14 +2585,14 @@ class FPGAMaxPool2D(ONNXForward):
                 vect_mx,
                 vec_out,
                 src_conn="output",
-                memlet=dace.Memlet(f"vec_data_out[w]")
+                memlet=dace.Memlet(f"vec_data_out[int_floor(in_x * {vec_width} + w, {filter_width}) % {vec_width}]")
             )
 
             to_memory_task = new_state.add_tasklet(
                 "to_memory_task",
                 inputs={"vec"},
                 outputs={"to_mem"},
-                code="to_mem = vec"
+                code=f"if in_y % {filter_height} == {filter_height} - 1 and in_x % {filter_width} == {filter_width} - 1: to_mem = vec",
             )
 
             new_state.add_memlet_path(
@@ -2605,7 +2607,7 @@ class FPGAMaxPool2D(ONNXForward):
                 outer_mx,
                 write_Y,
                 src_conn="to_mem",
-                memlet=y_memlet
+                memlet=y_memlet,
             )
 
 
