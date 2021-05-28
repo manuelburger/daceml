@@ -1385,7 +1385,10 @@ to_kernel = data""")
 
             access = f"[b, {channel}, {access_y} - {padding}, {access_x} - {padding}]"
 
-            access_vec = f"[b, {channel}, {access_y}, (int_floor(({access_x}), {vec_width_in})) + w0]"
+            access_vec = f"[b, {channel}, {access_y} - {padding}, (int_floor(({access_x}) - ({padding}), {vec_width_in})) + w0]"
+            access_vec_left = f"[b, {channel}, {access_y} - {padding}, w0]"
+            access_vec_right = f"[b, {channel}, {access_y} - {padding}, {input_size_x} - 1]"
+            access_x_vec = f"((int_floor(({access_x}) - ({padding}), {vec_width_in})) + w0)"
             # access_vec_next = f"[b, {channel}, {access_y}, (int_floor(({access_x}), {vec_width_in})) + 1]"
 
             access_flat = f"(b * {num_channels * int(input_size_x * vec_width_in) * input_size_y} + ({channel_cpp}) * {int(input_size_x * vec_width_in) * input_size_y} + ({access_y_cpp}) * {int(input_size_x * vec_width_in)} + ({access_x}))"
@@ -1394,9 +1397,11 @@ to_kernel = data""")
 
             tile_input_coverage = f"(({T} / {output_size_x}) * {input_size_x * vec_width_in})"
             print("Tile input coverage:", tile_input_coverage)
-            store_local_index = f"(({access_y}) * {input_size_x * vec_width_in} + {access_x}) - ({tile_input_coverage} * tm)"
-            store_local_index_cpp = f"(({access_y_cpp}) * {input_size_x * vec_width_in} + {access_x}) - ({tile_input_coverage} * tm)"
+            store_local_index = f"(({access_y} - {padding}) * {input_size_x * vec_width_in} + ({access_x}) + w1 - {padding}) - ({tile_input_coverage} * tm)"
+            store_local_index_cpp = f"(({access_y_cpp} - {padding}) * {input_size_x * vec_width_in} + ({access_x}) + w1 - {padding}) - ({tile_input_coverage} * tm)"
             access_local_index = "(0)"
+
+            print("Store local", store_local_index_cpp)
 
 
             # If we are out-of bound, use a dummy value
@@ -1417,9 +1422,10 @@ init_dummy = 0""")
                                 memlet=dace.Memlet("B_dummy[0]"))
 
 
+            print("offset x access", access_x)
             # Padding out of image test
-            padding_test_x = f"({access_x} - {padding} < {output_size_x} + {offset} and {access_x}  - {padding} >= 0)"
-            padding_test_x_cpp = f"({access_x} - {padding} < {output_size_x} + {offset} && {access_x}  - {padding} >= 0)"
+            padding_test_x = f"(({access_x}) + w1 - {padding} < {output_size_x} + {offset} and ({access_x}) + w1 - {padding} >= 0)"
+            padding_test_x_cpp = f"(({access_x}) + w1 - {padding} < {output_size_x} + {offset} && ({access_x}) + w1 - {padding} >= 0)"
 
             padding_test_y = f"({access_y_cpp} - {padding} < {output_size_y * Y.dtype.veclen} + {offset} and {access_y_cpp}  - {padding} >= 0)"
             padding_test_y_cpp = f"({access_y_cpp} - {padding} < {output_size_y * Y.dtype.veclen} + {offset} && {access_y_cpp}  - {padding} >= 0)"
@@ -1432,14 +1438,24 @@ init_dummy = 0""")
             # ----------------------------
             # read from global memory
             # ----------------------------
+            # padding: upper and lower boundary don't read at all
+            # padding: left boundary read at least from 0
+            # padding: right boundary read at most from input_size_x - 1
+            # TODO: add check to only support padding < filter_size / 2
             read_global_task = state.add_tasklet(
                 "read_global",
-                {"global_mem"},
+                {"global_mem", "global_left", "global_right"},
                 {"buf" : dace.vector(base_type, vec_width_in), }, # , "dummy_connection"},
 f"""
 # only read if within bounds
-if (tm*{T} + {m} < {M}):
-    buf = global_mem
+# only read if within image (padding upper/lower bound)
+if (tm*{T} + {m} < {M}) and ({padding_test_y}):
+    if {access_x_vec} < 0:
+        buf = global_left
+    elif {access_x_vec} > {input_size_x - 1}:
+        buf = global_right
+    else:
+        buf = global_mem
 
 """
             )
@@ -1452,6 +1468,32 @@ if (tm*{T} + {m} < {M}):
                 dst_conn="global_mem",
                 memlet=dace.Memlet(
                     f"X{access_vec}",
+                    dynamic=True,
+                    allow_oob=True
+                )
+            )
+
+            # leftmost access
+            state.add_memlet_path(
+                mem,
+                map_entry,
+                read_global_task,
+                dst_conn="global_left",
+                memlet=dace.Memlet(
+                    f"X{access_vec_left}",
+                    dynamic=True,
+                    allow_oob=True
+                )
+            )
+
+            # rightmost access
+            state.add_memlet_path(
+                mem,
+                map_entry,
+                read_global_task,
+                dst_conn="global_right",
+                memlet=dace.Memlet(
+                    f"X{access_vec_right}",
                     dynamic=True,
                     allow_oob=True
                 )
@@ -1529,7 +1571,8 @@ if (tm*{T} + {m} < {M}):
 if w0 == 1:
 
     # only write data if within bounds
-    if (tm*{T} + {m} < {M}):
+    # only write values if within image (padding)
+    if (tm*{T} + {m} < {M}) and ({padding_test_y}) and ({padding_test_x}):
         to_kernel = buf
         
     else:
