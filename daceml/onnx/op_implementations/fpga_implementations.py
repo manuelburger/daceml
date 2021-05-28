@@ -1330,7 +1330,20 @@ to_kernel = data""")
                            transient=True,
                            storage=dace.dtypes.StorageType.FPGA_Registers)
 
-            vec_buf_data = state.add_access("vec_buf_data")
+            # vec_buf_data = state.add_access("vec_buf_data")
+            vec_buf_data_write = state.add_write("vec_buf_data")
+            vec_buf_data_read = state.add_read("vec_buf_data")
+
+
+            new_sdfg.add_array("dummy_connector",
+                shape=[1],
+                dtype=vec_type,
+                transient=True,
+                storage=dace.dtypes.StorageType.FPGA_Registers)
+
+            
+            dummy_connector = state.add_access("dummy_connector")
+
 
             # Also while reading B, we have to consider that T and P could not divide
             # M and N
@@ -1341,14 +1354,14 @@ to_kernel = data""")
                 "tm": f"0:ceiling({M}/{T})", # number of tiles
                 "k": f"0:{K}",
                 "m0": f"0:{T}/{vec_width}", # go over tile
-                "w0": f"0:2"
+                "w0": f"0:2",
             },
             schedule=dace.ScheduleType.FPGA_Device)
 
-            # vector_map_entry, vector_map_exit = state.add_map(
-            #     "unrolled_reads_B", {"m1": "0:{}".format(vec_width_in)},
-            #     schedule=dace.ScheduleType.FPGA_Device,
-            #     unroll=True)
+            # double_read_entry, double_read_exit = state.add_map(
+            #     "double_read_map", {"w0": f"0:2"},
+            #     schedule=dace.ScheduleType.FPGA_Device
+            # )
 
             # Access mapping for Im2Col
             channel = f"int_floor(k, ({filter_hx} * {filter_hy}))"
@@ -1422,7 +1435,7 @@ init_dummy = 0""")
             read_global_task = state.add_tasklet(
                 "read_global",
                 {"global_mem"},
-                {"buf" : dace.vector(base_type, vec_width_in)}, # , "dummy_connection"},
+                {"buf" : dace.vector(base_type, vec_width_in), }, # , "dummy_connection"},
 f"""
 # only read if within bounds
 if (tm*{T} + {m} < {M}):
@@ -1435,6 +1448,7 @@ if (tm*{T} + {m} < {M}):
             state.add_memlet_path(
                 mem,
                 map_entry,
+                # double_read_entry,
                 read_global_task,
                 dst_conn="global_mem",
                 memlet=dace.Memlet(
@@ -1460,7 +1474,10 @@ if (tm*{T} + {m} < {M}):
             unpack_task = state.add_tasklet(
                 "unpacking_vector",
                 {"in_con"},
-                {"out_con" : dace.vector(base_type, vec_width_in)},
+                {
+                    "out_con" : dace.vector(base_type, vec_width_in),
+                    "dummy_con": dace.vector(base_type, vec_width_in)
+                },
                 "out_con = in_con"
             )
 
@@ -1482,9 +1499,19 @@ if (tm*{T} + {m} < {M}):
             state.add_memlet_path(
                 unpack_task,
                 unrolled_buffer_exit,
-                vec_buf_data,
+                # double_read_exit,
+                map_exit,
+                vec_buf_data_write,
                 src_conn="out_con",
                 memlet=dace.Memlet(f"vec_buf_data[w0 * {vec_width_in} + w1]")
+            )
+
+            state.add_memlet_path(
+                unpack_task,
+                unrolled_buffer_exit,
+                dummy_connector,
+                src_conn="dummy_con",
+                memlet=dace.Memlet(f"dummy_connector[0]"),
             )
 
 
@@ -1493,7 +1520,11 @@ if (tm*{T} + {m} < {M}):
             # ----------------------------------------
             write_pipe_task = state.add_tasklet(
                 "write_pipe",
-                {"buf", "dummy_value"}, # dummy_connection
+                {
+                    "buf",
+                    "dummy_value",
+                    "dummy_con"
+                },
                 {"to_kernel"}, # , "dummy_connection"},
                 f"""
 # only pack if second vector arrived
@@ -1518,7 +1549,9 @@ if w0 == 1:
             )
 
             state.add_memlet_path(
-                vec_buf_data,
+                vec_buf_data_read,
+                map_entry,
+                # double_read_entry,
                 vector_out_entry,
                 write_pipe_task,
                 dst_conn="buf",
@@ -1529,8 +1562,19 @@ if w0 == 1:
             )
 
             state.add_memlet_path(
+                dummy_connector,
+                vector_out_entry,
+                write_pipe_task,
+                dst_conn="dummy_con",
+                memlet=dace.Memlet(
+                    f"dummy_connector[0]",
+                )
+            )
+
+            state.add_memlet_path(
                 b_dummy,
                 map_entry,
+                # double_read_entry,
                 vector_out_entry,
                 write_pipe_task,
                 dst_conn="dummy_value",
@@ -1568,6 +1612,7 @@ if w0 == 1:
 
             state.add_memlet_path(
                 write_out_task,
+                # double_read_exit,
                 map_exit,
                 pipe,
                 src_conn="out_con",
