@@ -1634,7 +1634,7 @@ if w0 == 1:
                     "tm": f"0:ceiling({M}/{T})",
                     "n1": f"0:{P}",
                     # "m": f"0:{T}"
-                    "m": f"0:{T / vec_width}" # vectorization support on output
+                    "m": f"0:{int(T / vec_width)}" # vectorization support on output
                 },
                 schedule=dace.ScheduleType.FPGA_Device)
 
@@ -1874,11 +1874,11 @@ if m >= {L} and not {entry_pipeline.pipeline.drain_condition()}:
 # How: 
 # - if k = K-1 and m>=L: then the PE drains its own result
 #-  otherwise, if k_drain<p forward data coming from previous PEs (this could happens also in the drain phase)
-if((b > 0 or n0 > 0 or tm > 0)  and k_drain <p and m_drain <{T / vec_width}) or  (k=={K}-1 and m>= {L}) or ({entry_pipeline.pipeline.drain_condition()} and k_drain < p): # modification to standard GEMM, also consider b
+if((b > 0 or n0 > 0 or tm > 0)  and k_drain <p and m_drain < {int(T / vec_width)}) or  (k=={K}-1 and m>= {L}) or ({entry_pipeline.pipeline.drain_condition()} and k_drain < p): # modification to standard GEMM, also consider b
     c_pipe_out = result if (p==0 or (k_drain=={K}-1 and not {entry_pipeline.pipeline.drain_condition()})) else forward_in
 # adjust draining iterators
 if not {entry_pipeline.pipeline.drain_condition()}:
-    if m_drain >= {L} +  {T / vec_width} -1:
+    if m_drain >= {L} +  {int(T / vec_width)} -1:
         m_drain = 0
         if k_drain >= {K} - 1:
             k_drain = 0
@@ -1887,7 +1887,7 @@ if not {entry_pipeline.pipeline.drain_condition()}:
     else:
         m_drain = m_drain + 1
 else:
-    if m_drain >=  {T / vec_width} -1:
+    if m_drain >=  {int(T / vec_width)} -1:
         m_drain = 0
         if k_drain >= {K} - 1:
             k_drain = 0
