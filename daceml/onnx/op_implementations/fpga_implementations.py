@@ -1388,7 +1388,7 @@ to_kernel = data""")
 
             access = f"[b, {channel}, {access_y} - {padding}, {access_x} - {padding}]"
 
-            access_vec = f"[b, {channel}, {access_y} - {padding}, (int_floor(({access_x}) - ({padding}), {vec_width_in})) + w0]"
+            access_vec = f"[b, {channel}, {access_y} - {padding}, min(max((int_floor(({access_x}) - ({padding}), {vec_width_in})) + w0, 0), {input_size_x - 1})]"
             access_vec_left = f"[b, {channel}, {access_y} - {padding}, w0]"
             access_vec_right = f"[b, {channel}, {access_y} - {padding}, {input_size_x} - 1]"
 
@@ -1453,19 +1453,13 @@ init_dummy = 0""")
             # add check to only support padding < filter_size / 2
             read_global_task = state.add_tasklet(
                 "read_global",
-                {"global_mem", "global_left", "global_right"},
+                {"global_mem"}, # , "global_left", "global_right"},
                 {"buf" : dace.vector(base_type, vec_width_in), }, # , "dummy_connection"},
 f"""
 # only read if within bounds
 # only read if within image (padding upper/lower bound)
 if (tm*{T} + {m} < {M}) and ({padding_test_y}):
-    if {access_x_vec_cpp} < 0:
-        buf = global_left
-    elif {access_x_vec_cpp} > {input_size_x - 1}:
-        buf = global_right
-    else:
-        buf = global_mem
-
+    buf = global_mem
 """
             )
 
@@ -1477,32 +1471,6 @@ if (tm*{T} + {m} < {M}) and ({padding_test_y}):
                 dst_conn="global_mem",
                 memlet=dace.Memlet(
                     f"X{access_vec}",
-                    dynamic=True,
-                    allow_oob=True
-                )
-            )
-
-            # leftmost access
-            state.add_memlet_path(
-                mem,
-                map_entry,
-                read_global_task,
-                dst_conn="global_left",
-                memlet=dace.Memlet(
-                    f"X{access_vec_left}",
-                    dynamic=True,
-                    allow_oob=True
-                )
-            )
-
-            # rightmost access
-            state.add_memlet_path(
-                mem,
-                map_entry,
-                read_global_task,
-                dst_conn="global_right",
-                memlet=dace.Memlet(
-                    f"X{access_vec_right}",
                     dynamic=True,
                     allow_oob=True
                 )
