@@ -983,6 +983,9 @@ class FPGAIm2ColConv_tiled(ONNXForward):
                                       or len(node.pads) != image_dims * 2):                
             return False
 
+        if node.pads[0] > W.shape[2] // 2:
+            return False
+
         # if node.pads is not None and node.pads[0] > 0:
         #     raise ValueError("Attention, no padding support yet on tiled Im2Col Convolution")
 
@@ -1388,17 +1391,23 @@ to_kernel = data""")
             access_vec = f"[b, {channel}, {access_y} - {padding}, (int_floor(({access_x}) - ({padding}), {vec_width_in})) + w0]"
             access_vec_left = f"[b, {channel}, {access_y} - {padding}, w0]"
             access_vec_right = f"[b, {channel}, {access_y} - {padding}, {input_size_x} - 1]"
+
             access_x_vec = f"((int_floor(({access_x}) - ({padding}), {vec_width_in})) + w0)"
+            access_x_vec_cpp = f"((((({access_x}) - {padding}) / {vec_width_in})) + w0)"
+
+            print(f"Access X: {access_x}")
             # access_vec_next = f"[b, {channel}, {access_y}, (int_floor(({access_x}), {vec_width_in})) + 1]"
 
             access_flat = f"(b * {num_channels * int(input_size_x * vec_width_in) * input_size_y} + ({channel_cpp}) * {int(input_size_x * vec_width_in) * input_size_y} + ({access_y_cpp}) * {int(input_size_x * vec_width_in)} + ({access_x}))"
             access_flat_vec = f"(b * {num_channels * input_size_x * input_size_y} + ({channel_cpp}) * {input_size_x * input_size_y} + ({access_y_cpp}) * {input_size_x} + (({access_x}) / {vec_width_in}))"
 
 
-            tile_input_coverage = f"(({T} / {output_size_x}) * {input_size_x * vec_width_in})"
-            print("Tile input coverage:", tile_input_coverage)
-            store_local_index = f"(({access_y} - {padding}) * {input_size_x * vec_width_in} + ({access_x}) + w1 - {padding}) - ({tile_input_coverage} * tm)"
-            store_local_index_cpp = f"(({access_y_cpp} - {padding}) * {input_size_x * vec_width_in} + ({access_x}) + w1 - {padding}) - ({tile_input_coverage} * tm)"
+            tile_input_coverage = f"((int_floor({T}, {output_size_x})) * {input_size_x * vec_width_in})"
+            tile_input_coverage_cpp = f"(({T} / {output_size_x}) * {input_size_x * vec_width_in})"
+            # print("Tile input coverage:", tile_input_coverage)
+
+            store_local_index = f"(({access_y} - {padding}) * {input_size_x * vec_width_in} + ({access_x}) - {padding}) - ({tile_input_coverage} * tm)"
+            store_local_index_cpp = f"(({access_y_cpp} - {padding}) * {input_size_x * vec_width_in} + ({access_x}) - {padding}) - ({tile_input_coverage_cpp} * tm)"
             access_local_index = "(0)"
 
             print("Store local", store_local_index_cpp)
@@ -1441,7 +1450,7 @@ init_dummy = 0""")
             # padding: upper and lower boundary don't read at all
             # padding: left boundary read at least from 0
             # padding: right boundary read at most from input_size_x - 1
-            # TODO: add check to only support padding < filter_size / 2
+            # add check to only support padding < filter_size / 2
             read_global_task = state.add_tasklet(
                 "read_global",
                 {"global_mem", "global_left", "global_right"},
@@ -1450,9 +1459,9 @@ f"""
 # only read if within bounds
 # only read if within image (padding upper/lower bound)
 if (tm*{T} + {m} < {M}) and ({padding_test_y}):
-    if {access_x_vec} < 0:
+    if {access_x_vec_cpp} < 0:
         buf = global_left
-    elif {access_x_vec} > {input_size_x - 1}:
+    elif {access_x_vec_cpp} > {input_size_x - 1}:
         buf = global_right
     else:
         buf = global_mem
@@ -1562,6 +1571,7 @@ if (tm*{T} + {m} < {M}) and ({padding_test_y}):
                 "write_pipe",
                 {
                     "buf",
+                    "buf_left",
                     "dummy_value",
                     "dummy_con"
                 },
@@ -1573,7 +1583,14 @@ if w0 == 1:
     # only write data if within bounds
     # only write values if within image (padding)
     if (tm*{T} + {m} < {M}) and ({padding_test_y}) and ({padding_test_x}):
-        to_kernel = buf
+
+        # adjust buffer access on left image boundary
+        # <= 1, because we only write the buffer on w0 == 1, 
+        # thus x access has an offset
+        if ({access_x} - {padding}) < 0:
+            to_kernel = buf_left
+        else:
+            to_kernel = buf
         
     else:
         to_kernel = dummy_value
@@ -1597,6 +1614,21 @@ if w0 == 1:
                 dst_conn="buf",
                 memlet=dace.Memlet(
                     f"vec_buf_data[(({store_local_index}) % {vec_width_in}) + w1]",
+                    dynamic=True,
+                )
+            )
+
+            # additional padding offset if on left side boundary of image
+            # because the buffer only starts where the image begins, but
+            # {store_local_index} considers the padding as part of the image
+            state.add_memlet_path(
+                vec_buf_data_read,
+                map_entry,
+                vector_out_entry,
+                write_pipe_task,
+                dst_conn="buf_left",
+                memlet=dace.Memlet(
+                    f"vec_buf_data[(({store_local_index}) % {vec_width_in}) + w1 - {vec_width_in}]",
                     dynamic=True,
                 )
             )
