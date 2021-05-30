@@ -2384,8 +2384,10 @@ class FPGAMaxPool2D(ONNXForward):
         #Attention, the storing location must take into account that the input was vectorized
         if vec_width != 1 and Y.veclen == 1:
             y_memlet = dace.Memlet(
-                f"Y[b,c, int_floor(in_y, {filter_height}), int_floor((in_x*{vec_width}+w), {filter_width})]", allow_oob=True
-            )
+                f"Y[b,c, in_y//{filter_height}, (in_x*{vec_width}+w)//{filter_width}]")
+        elif vec_width == 1 and Y.veclen == 1:
+            y_memlet = dace.Memlet(
+                f"Y[b,c, in_y//{filter_height}, in_x//{filter_width}]")
         else:
             y_memlet = dace.Memlet(
                 f"Y[b,c, int_floor(in_y, {filter_height}), int_floor(in_x, {filter_width})]", allow_oob=True, 
