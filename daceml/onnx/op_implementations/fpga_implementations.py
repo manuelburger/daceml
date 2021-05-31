@@ -1572,6 +1572,8 @@ if {load_test}:
             # ----------------------------------------
             # write to output vector buffer
             # ----------------------------------------
+            # TODO: make buffer vectorized and access vectors to reduce BRAM duplication
+            # TODO: check II, run in hardware
             write_pipe_task = state.add_tasklet(
                 "write_pipe",
                 {"buf", "dummy_value", "dummy_con"}, # dummy_connection
