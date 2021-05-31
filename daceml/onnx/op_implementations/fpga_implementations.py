@@ -2227,6 +2227,10 @@ class FPGAMaxPool2D(ONNXForward):
         Y = out_desc_with_name(node, state, sdfg, "Y")
         vec_width = X.veclen
 
+        print("---------------- MAXPOOL ----------------")
+        print(f"X: {X.shape}, Y: {Y.shape}, kernel: {node.kernel_shape}")
+        print("---------------- MAXPOOL ----------------")
+
         image_dims = len(X.shape) - 2
         batch_size = X.shape[0]
         num_channels = X.shape[1]
@@ -2389,9 +2393,13 @@ class FPGAMaxPool2D(ONNXForward):
             y_memlet = dace.Memlet(
                 f"Y[b,c, in_y//{filter_height}, in_x//{filter_width}]")
         else:
+            print("vectorize in and out")
             y_memlet = dace.Memlet(
                 f"Y[b,c, int_floor(in_y, {filter_height}), int_floor(in_x, {filter_width})]", allow_oob=True, 
                 dynamic=True)
+            # y_memlet = dace.Memlet(
+            #     f"Y[b,c, (in_y // {filter_height}), (in_x // {filter_width})]", allow_oob=True, 
+            #     dynamic=True)
 
         # dynamic memlet (to access only when needed) from compute tasklet to out image
         # Attention: use propagate=False otherwise it does not validate
@@ -2414,7 +2422,7 @@ class FPGAMaxPool2D(ONNXForward):
                 vect_mx,
                 vec_out,
                 src_conn="output",
-                memlet=dace.Memlet(f"vec_data_out[int_floor(in_x * {vec_width} + w, {filter_width}) % {vec_width}]")
+                memlet=dace.Memlet(f"vec_data_out[int_floor(in_x * {vec_width} + w, {filter_width}) % {vec_width}]", dynamic=True)
             )
 
             to_memory_task = new_state.add_tasklet(
