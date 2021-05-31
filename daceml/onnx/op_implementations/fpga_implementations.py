@@ -983,6 +983,10 @@ class FPGAIm2ColConv_tiled(ONNXForward):
                                       or len(node.pads) != image_dims * 2):                
             return False
 
+
+        if node.pads[0] > W.shape[2] // 2:
+            return False
+
         # if node.pads is not None and node.pads[0] > 0:
         #     raise ValueError("Attention, no padding support yet on tiled Im2Col Convolution")
 
@@ -1403,9 +1407,11 @@ to_kernel = data""")
             access_x_cpp_img = f"({out_x}) + {filter_off_x_cpp_img}"
 
             tile_input_coverage = f"(int_floor({T}, {output_size_x}) * {input_size_x * vec_width_in})"
+            tile_input_coverage_cpp = f"(({T}/ {output_size_x}) * {input_size_x * vec_width_in})"
 
             accessed_pixel = f"(tm*int_floor({tile_input_coverage}, {vec_width_in}) + m0)"
-            access_load = f"[b, {channel_load},  min({input_size_y - 1}, int_floor({accessed_pixel}, {input_size_x})) , {accessed_pixel} % {input_size_x}]"
+            accessed_pixel_cpp = f"(tm*({tile_input_coverage_cpp}/ {vec_width_in}) + m0)"
+            access_load = f"[b, {channel_load},  min({input_size_y - 1 + (2 * padding)}, int_floor({accessed_pixel}, {input_size_x})) - {padding}, {accessed_pixel} % {input_size_x}]"
             access_img = f"[b, {channel_img}, {access_y_img} - {padding}, {access_x_img} - {padding}]"
 
             # print("accessed pixel:", accessed_pixel)
@@ -1422,12 +1428,12 @@ to_kernel = data""")
             store_local_index_load = f"(({access_y_load}) * {input_size_x * vec_width_in} + {access_x_load}) - ({tile_input_coverage} * tm)"
             store_local_index_cpp_load = f"(({access_y_cpp_load}) * {input_size_x * vec_width_in} + {access_x_cpp_load}) - ({tile_input_coverage} * tm)"
 
-            print("store local: ", store_local_index_cpp_load)
-            print("access y load: ", access_y_cpp_load)
-            print("access x load: ", access_x_load)
+            # print("store local: ", store_local_index_cpp_load)
+            # print("access y load: ", access_y_cpp_load)
+            # print("access x load: ", access_x_load)
 
-            store_local_index_img = f"(({access_y_img}) * {input_size_x * vec_width_in} + {access_x_img}) - ({tile_input_coverage} * tm)"
-            store_local_index_cpp_img = f"(({access_y_cpp_img}) * {input_size_x * vec_width_in} + {access_x_cpp_img}) - ({tile_input_coverage} * tm)"
+            store_local_index_img = f"(({access_y_img}) * {input_size_x * vec_width_in} + ({access_x_img}) - {padding}) - ({tile_input_coverage} * tm)"
+            store_local_index_cpp_img = f"(({access_y_cpp_img}) * {input_size_x * vec_width_in} + ({access_x_cpp_img}) - {padding}) - ({tile_input_coverage} * tm)"
 
 
             # If we are out-of bound, use a dummy value
@@ -1449,15 +1455,15 @@ init_dummy = 0""")
 
 
             # Padding out of image test
-            padding_test_x_load = f"({access_x_load} - {padding} < {output_size_x} + {offset} and {access_x_load}  - {padding} >= 0)"
-            padding_test_x_cpp_load = f"({access_x_load} - {padding} < {output_size_x} + {offset} && {access_x_load}  - {padding} >= 0)"
-            padding_test_y_load = f"({access_y_cpp_load} - {padding} < {output_size_y * Y.dtype.veclen} + {offset} and {access_y_cpp_load}  - {padding} >= 0)"
-            padding_test_y_cpp_load = f"({access_y_cpp_load} - {padding} < {output_size_y * Y.dtype.veclen} + {offset} && {access_y_cpp_load}  - {padding} >= 0)"
+            # padding_test_x_load = f"({access_x_load} - {padding} < {output_size_x} + {offset} and {access_x_load}  - {padding} >= 0)"
+            # padding_test_x_cpp_load = f"({access_x_load} - {padding} < {output_size_x} + {offset} && {access_x_load}  - {padding} >= 0)"
+            padding_test_y_load = f"((int_floor({accessed_pixel}, {input_size_x})) - {padding} < {output_size_y * Y.dtype.veclen} + {offset} and (int_floor({accessed_pixel}, {input_size_x}))  - {padding} >= 0)"
+            padding_test_y_cpp_load = f"((({accessed_pixel_cpp}/ {input_size_x})) - {padding} < {output_size_y * Y.dtype.veclen} + {offset} and (({accessed_pixel_cpp}/ {input_size_x}))  - {padding} >= 0)"
 
-            padding_test_x_img = f"({access_x_img} - {padding} < {output_size_x} + {offset} and {access_x_img}  - {padding} >= 0)"
-            padding_test_x_cpp_img = f"({access_x_img} - {padding} < {output_size_x} + {offset} && {access_x_img}  - {padding} >= 0)"
-            padding_test_y_img = f"({access_y_cpp_img} - {padding} < {output_size_y * Y.dtype.veclen} + {offset} and {access_y_cpp_img}  - {padding} >= 0)"
-            padding_test_y_cpp_img = f"({access_y_cpp_img} - {padding} < {output_size_y * Y.dtype.veclen} + {offset} && {access_y_cpp_img}  - {padding} >= 0)"
+            padding_test_x_img = f"(({access_x_img}) + m1 - {padding} < {output_size_x} + {offset} and ({access_x_img}) + m1  - {padding} >= 0)"
+            padding_test_x_cpp_img = f"(({access_x_cpp_img}) + m1 - {padding} < {output_size_x} + {offset} and ({access_x_cpp_img}) + m1  - {padding} >= 0)"
+            padding_test_y_img = f"(({access_y_cpp_img}) - {padding} < {output_size_y * Y.dtype.veclen} + {offset} and {access_y_cpp_img}  - {padding} >= 0)"
+            padding_test_y_cpp_img = f"(({access_y_cpp_img}) - {padding} < {output_size_y * Y.dtype.veclen} + {offset} and {access_y_cpp_img}  - {padding} >= 0)"
 
 
             # Connectors for global memory
@@ -1473,7 +1479,7 @@ init_dummy = 0""")
                 {"buf" : dace.vector(base_type, vec_width_in)}, # , "dummy_connection"},
 f"""
 # load cycle, read data from memory
-if {load_test}:
+if {load_test} and {padding_test_y_cpp_load}:
     buf = load_read
 
 """
@@ -1515,7 +1521,10 @@ f"""
 # only write if within bounds
 # load cycle, fill buffer
 if {load_test}:
-    load_write = buf
+    if {padding_test_y_cpp_load}:
+        load_write = buf
+    else:
+        load_write = 0
 """
             )
 
@@ -1573,7 +1582,7 @@ if {load_test}:
 if (not ({load_test})) and (m0 < {T}/{vec_width}):
 
     # only write data if within bounds
-    if (tm*{T} + {m} < {M}):
+    if (tm*{T} + {m} < {M}) and {padding_test_y_cpp_img} and {padding_test_x_cpp_img}:
         to_kernel = buf
 
     # write 0 if out-of-bounds
