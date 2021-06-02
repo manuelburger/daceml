@@ -1301,8 +1301,8 @@ to_kernel = data""")
 
             print("Buffer input coverage", tile_buf_coverage)
 
-            new_sdfg.add_array("img_buffer", [buffer_size],
-                        dtype=base_type,
+            new_sdfg.add_array("img_buffer", [buffer_size // vec_width_in],
+                        dtype=vec_type,
                         transient=True,
                         storage=dace.dtypes.StorageType.FPGA_Local)
 
@@ -1313,13 +1313,21 @@ to_kernel = data""")
 
             # local vector buffer to hold vector data from global memory
             new_sdfg.add_array("vec_buf_B",
-                           shape=[vec_width_in],
-                           dtype=base_type,
+                           shape=[1],
+                           dtype=vec_type,
                            transient=True,
                            storage=dace.dtypes.StorageType.FPGA_Registers)
 
             vec_buf_B = state.add_access("vec_buf_B")
             # vec_buf_B_dummy = state.add_write("vec_buf_B")
+
+            new_sdfg.add_array("vec_buf_data",
+                           shape=[vec_width_in * 2],
+                           dtype=base_type,
+                           transient=True,
+                           storage=dace.dtypes.StorageType.FPGA_Registers)
+
+            vec_buf_data = state.add_access("vec_buf_data")
 
 
             # local vector buffer to hold data to send to stream
@@ -1528,33 +1536,33 @@ if {load_test}:
 """
             )
 
-            vector_map_entry, vector_map_exit = state.add_map(
-                "unrolled_to_local",
-                {"m1": f"0:{vec_width_in}"},
-                schedule=dace.ScheduleType.FPGA_Device,
-                unroll=True
-            )
+            # vector_map_entry, vector_map_exit = state.add_map(
+            #     "unrolled_to_local",
+            #     {"m1": f"0:{vec_width_in}"},
+            #     schedule=dace.ScheduleType.FPGA_Device,
+            #     unroll=True
+            # )
 
             # Read from buffer
             state.add_memlet_path(
                 vec_buf_B,
-                vector_map_entry,
+                # vector_map_entry,
                 copy_to_local_task,
                 dst_conn="buf",
                 memlet=dace.Memlet(
-                    "vec_buf_B[m1]",
+                    "vec_buf_B",
                 )
             )
 
             # Store in buffer, load cycle
             state.add_memlet_path(
                 copy_to_local_task,
-                vector_map_exit,
+                # vector_map_exit,
                 map_exit,
                 img_buffer_write, # use iteration global write buffer
                 src_conn="load_write",
                 memlet=dace.Memlet(
-                    f"img_buffer[m0 * {vec_width_in} + m1]",
+                    f"img_buffer[m0]",
                     dynamic=True,
                 )
             )
@@ -1562,11 +1570,53 @@ if {load_test}:
                         # connect graph reader and writer sections
             state.add_memlet_path(
                 copy_to_local_task,
-                vector_map_exit,
+                # vector_map_exit,
                 dummy_container,
                 src_conn="dummy_con",
                 memlet=dace.Memlet("dummy_container[0]")
             )
+
+
+            # ----------------------------------------
+            # unrolled read from vectorized buffer into register for unaligned access
+            # ----------------------------------------
+            buffer_read_task = state.add_tasklet(
+                "move_to_local",
+                {"buf"},
+                {"vector" : dace.vector(base_type, vec_width_in)},
+                f"vector = buf"
+            )
+
+            vector_map_entry, vector_map_exit = state.add_map(
+                "unrolled_to_local",
+                {"m1": f"0:2"}, # always read two vectors
+                schedule=dace.ScheduleType.FPGA_Device,
+                unroll=True
+            )
+
+            # Read from buffer
+            state.add_memlet_path(
+                img_buffer_read,
+                map_entry,
+                vector_map_entry,
+                buffer_read_task,
+                dst_conn="buf",
+                memlet=dace.Memlet(
+                    f"img_buffer[min({buffer_size // vec_width_in} - 1, int_floor({store_local_index_img}, {vec_width_in}) + m1)]",
+                )
+            )
+
+            # Store in buffer, load cycle
+            state.add_memlet_path(
+                buffer_read_task,
+                vector_map_exit,
+                vec_buf_data,
+                src_conn="vector",
+                memlet=dace.Memlet(
+                    f"vec_buf_data[m1 * {vec_width_in}]"
+                )
+            )
+
 
 
             # ----------------------------------------
@@ -1585,6 +1635,10 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
 
     # only write data if within bounds
     if (tm*{T} + {m} < {M}) and {padding_test_y_cpp_img} and {padding_test_x_cpp_img}:
+        # if ({access_x_cpp_img} - {padding}) < 0:
+        #     to_kernel = buf_left
+        # else:
+        #     to_kernel = buf
         to_kernel = buf
 
     # write 0 if out-of-bounds
@@ -1603,16 +1657,29 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
             )
 
             state.add_memlet_path(
-                img_buffer_read,
-                map_entry,
+                vec_buf_data,
+                # map_entry,
                 vector_out_entry,
                 write_pipe_task,
                 dst_conn="buf",
                 memlet=dace.Memlet(
-                    f"img_buffer[({store_local_index_img}) + m1]",
+                    f"vec_buf_data[((({store_local_index_img}) - (int_floor({store_local_index_img}, {vec_width_in}) * {vec_width_in})) + m1)]",
+                    # f"vec_buf_data[((({store_local_index_img}) % {vec_width_in}) + m1)]", # because Symby transforms this to yield only positive integers
                     dynamic=True,
                 )
             )
+
+            # state.add_memlet_path(
+            #     vec_buf_data,
+            #     # map_entry,
+            #     vector_out_entry,
+            #     write_pipe_task,
+            #     dst_conn="buf_left",
+            #     memlet=dace.Memlet(
+            #         f"vec_buf_data[((({store_local_index_img}) % {vec_width_in}) + m1) - {vec_width_in}]",
+            #         dynamic=True,
+            #     )
+            # )
 
             state.add_memlet_path(
                 b_dummy,
@@ -1914,7 +1981,7 @@ if  m>={L} and not {entry_pipeline.pipeline.drain_condition()}:
                 {"a_in", "b_in", "c_in", "forward_in", "c_init_data"},
                 {"b_out", "c_out", "c_pipe_out"}, f"""\
 result = c_in
-if m >= {L} and not {entry_pipeline.pipeline.drain_condition()}:
+if m >= {int(L)} and not {entry_pipeline.pipeline.drain_condition()}:
     c_prev = c_init_data if k == 0 else c_in
     result =  c_prev + a_in * b_in
     c_out = result
@@ -1928,11 +1995,11 @@ if m >= {L} and not {entry_pipeline.pipeline.drain_condition()}:
 # How: 
 # - if k = K-1 and m>=L: then the PE drains its own result
 #-  otherwise, if k_drain<p forward data coming from previous PEs (this could happens also in the drain phase)
-if((b > 0 or n0 > 0 or tm > 0)  and k_drain <p and m_drain <{T / vec_width}) or  (k=={K}-1 and m>= {L}) or ({entry_pipeline.pipeline.drain_condition()} and k_drain < p): # modification to standard GEMM, also consider b
+if((b > 0 or n0 > 0 or tm > 0)  and k_drain <p and m_drain <{int(T / vec_width)}) or  (k=={K}-1 and m>= {int(L)}) or ({entry_pipeline.pipeline.drain_condition()} and k_drain < p): # modification to standard GEMM, also consider b
     c_pipe_out = result if (p==0 or (k_drain=={K}-1 and not {entry_pipeline.pipeline.drain_condition()})) else forward_in
 # adjust draining iterators
 if not {entry_pipeline.pipeline.drain_condition()}:
-    if m_drain >= {L} +  {T / vec_width} -1:
+    if m_drain >= {int(L)} +  {int(T / vec_width)} -1:
         m_drain = 0
         if k_drain >= {K} - 1:
             k_drain = 0
@@ -1941,7 +2008,7 @@ if not {entry_pipeline.pipeline.drain_condition()}:
     else:
         m_drain = m_drain + 1
 else:
-    if m_drain >=  {T / vec_width} -1:
+    if m_drain >=  {int(T / vec_width)} -1:
         m_drain = 0
         if k_drain >= {K} - 1:
             k_drain = 0
