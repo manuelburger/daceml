@@ -2372,7 +2372,8 @@ class FPGAMaxPool2D(ONNXForward):
         # if vec_width > 1 this will deal with it
         vect_me, vect_mx = new_state.add_map('vect_pool_map',
                                              dict(w="0:{}".format(vec_width)),
-                                             unroll=True)
+                                             unroll=True
+                                             )
 
         # the inner map computes the pooling
         inner_me, inner_mx = new_state.add_map(
@@ -2427,8 +2428,14 @@ class FPGAMaxPool2D(ONNXForward):
         # To create the shift register outside the map, add an empty memlet path
         # shift_register_write = new_state.add_write("shift_register")
         shift_register_read = new_state.add_read("shift_register")
-
         new_state.add_memlet_path(shift_register_read,
+                                  outer_me,
+                                  memlet=dace.Memlet())
+
+        # create vector output buffer outside map, empty memlet path
+        if Y.veclen != 1:
+            vec_out_read = new_state.add_read("vec_data_out")
+            new_state.add_memlet_path(vec_out_read,
                                   outer_me,
                                   memlet=dace.Memlet())
 
@@ -2477,7 +2484,6 @@ class FPGAMaxPool2D(ONNXForward):
 
         # dynamic memlet (to access only when needed) from compute tasklet to out image
         # Attention: use propagate=False otherwise it does not validate
-
         if Y.veclen == 1:
             new_state.add_memlet_path(compute_tasklet,
                                     inner_mx,
