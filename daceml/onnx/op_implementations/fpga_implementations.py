@@ -2308,6 +2308,12 @@ class FPGAMaxPool2D(ONNXForward):
         out_vec_width = Y.veclen
         print(f"[MAXPOOL] input vec: {vec_width}, output vec: {out_vec_width}")
 
+        # Xilinx implementation specific
+        vendor = dace.config.Config.get("compiler", "fpga_vendor")
+        xilinx = True if vendor == "xilinx" else False
+        xilinx_buffer_register = True
+        xilinx_buffer_type = dace.StorageType.FPGA_Registers if xilinx_buffer_register else dace.dtypes.StorageType.FPGA_Local
+
         image_dims = len(X.shape) - 2
         batch_size = X.shape[0]
         num_channels = X.shape[1]
@@ -2333,9 +2339,10 @@ class FPGAMaxPool2D(ONNXForward):
         shift_register_size = input_size_width * vec_width * (
             filter_height - 1) + (filter_width - 1) + 1
 
+        buffer_type = xilinx_buffer_type if xilinx else dace.StorageType.FPGA_ShiftRegister
         new_sdfg.add_array("shift_register", [shift_register_size],
                            X.dtype.type,
-                           storage=dace.StorageType.FPGA_ShiftRegister,
+                           storage=buffer_type,
                            transient=True)
         # variable for reduction
         new_sdfg.add_array("max_res", [1],
@@ -2390,7 +2397,7 @@ class FPGAMaxPool2D(ONNXForward):
 
         # compute the maximum: we can compute always, but we can write the result only
         # according to the slide and at the end of the filter loops
-        # NOTE: in_x could reflect the fact that it is vctorized
+        # NOTE: in_x could reflect the fact that it is vectorized
         compute_tasklet = new_state.add_tasklet(
             "compute_entry",
             inputs={"image_in", "max_in"},
@@ -2417,10 +2424,14 @@ class FPGAMaxPool2D(ONNXForward):
                                   memlet=dace.Memlet("X[b, c, in_y, in_x]"))
 
         # memlet: from input image to shift register
+        other_subset = f"{shift_register_size - 1}"
+        if xilinx:
+            other_subset = f"(in_y * {(input_size_width * vec_width)} + (in_x * {vec_width}) + w) % {shift_register_size}"
         to_shift_register_memlet = dace.Memlet(
             "vec_data[{}]".format('0' if vec_width == 1 else 'w'),
-            other_subset="{}".format(shift_register_size - 1))
-        # explicitely set oob otherwise is not taken
+            other_subset=other_subset)
+
+        # explicitly set oob otherwise it is not taken
         to_shift_register_memlet.allow_oob = True
         new_state.add_memlet_path(vec_data,
                                   vect_me,
@@ -2444,13 +2455,15 @@ class FPGAMaxPool2D(ONNXForward):
 
         # memlet from shift register to max tasklet
         # NOTE: vec width
+        element = f"(hy*{input_size_width * vec_width}+hx)"
+        access = f"shift_register[{element}]"
+        if xilinx:
+            access = f"shift_register[(in_y * {(input_size_width * vec_width)} + (in_x * {vec_width}) + {element} + 1) % {shift_register_size}]"
         new_state.add_memlet_path(shift_register,
                                   inner_me,
                                   compute_tasklet,
                                   dst_conn="image_in",
-                                  memlet=dace.Memlet(
-                                      "shift_register[hy*{}+hx]".format(
-                                          input_size_width * vec_width)))
+                                  memlet=dace.Memlet(access))
 
         #memlets for max
         new_state.add_memlet_path(read_max_res,
