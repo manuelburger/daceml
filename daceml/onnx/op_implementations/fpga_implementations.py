@@ -2260,12 +2260,14 @@ class FPGAMaxPool2D(ONNXForward):
         #     return False
 
         if Y.veclen != 1:  # if output vectorized must match
-            return X.veclen == Y.veclen
+            filter_height, filter_width = node.kernel_shape
+            return X.veclen == Y.veclen or X.veclen == filter_width * Y.veclen # support reducing vector size proportionally to filter
 
         if "Indices" in {e.src_conn for e in state.out_edges(node)}:
             return False
 
         image_dims = len(X.shape) - 2
+
 
         # only do 2D for now
         if image_dims != 2:
@@ -2304,6 +2306,8 @@ class FPGAMaxPool2D(ONNXForward):
         X = in_desc_with_name(node, state, sdfg, "X")
         Y = out_desc_with_name(node, state, sdfg, "Y")
         vec_width = X.veclen
+        out_vec_width = Y.veclen
+        print(f"[MAXPOOL] input vec: {vec_width}, output vec: {out_vec_width}")
 
         image_dims = len(X.shape) - 2
         batch_size = X.shape[0]
@@ -2351,7 +2355,7 @@ class FPGAMaxPool2D(ONNXForward):
         if Y.veclen > 1:
             new_sdfg.add_array('vec_data_out',
                         shape=[
-                            vec_width,
+                            out_vec_width,
                         ],
                         dtype=Y.dtype.type,
                         transient=True,
@@ -2474,9 +2478,15 @@ class FPGAMaxPool2D(ONNXForward):
             y_memlet = dace.Memlet(
                 f"Y[b,c, in_y//{filter_height}, in_x//{filter_width}]")
         else:
-            print("vectorize in and out")
+            # print("vectorize in and out")
+            x_access = f"int_floor(in_x, {filter_width})"
+            if X.veclen == filter_width * Y.veclen:
+                # if input vector size is a multiple of the output vector size
+                # we can output to each index of the input on the output
+                x_access = "in_x"
+
             y_memlet = dace.Memlet(
-                f"Y[b,c, int_floor(in_y, {filter_height}), int_floor(in_x, {filter_width})]", allow_oob=True, 
+                f"Y[b,c, int_floor(in_y, {filter_height}), {x_access}]", allow_oob=True, 
                 dynamic=True)
             # y_memlet = dace.Memlet(
             #     f"Y[b,c, (in_y // {filter_height}), (in_x // {filter_width})]", allow_oob=True, 
@@ -2502,14 +2512,21 @@ class FPGAMaxPool2D(ONNXForward):
                 vect_mx,
                 vec_out,
                 src_conn="output",
-                memlet=dace.Memlet(f"vec_data_out[int_floor(in_x * {vec_width} + w, {filter_width}) % {vec_width}]", dynamic=True)
+                memlet=dace.Memlet(f"vec_data_out[int_floor(in_x * {vec_width} + w, {filter_width}) % {out_vec_width}]", dynamic=True)
             )
 
+            if X.veclen == filter_width * Y.veclen:
+                # if the input vector size is a filter multiple of the output vector size
+                # we can write to the output on every iteration while reading the correct row
+                # on the input
+                code = f"if in_y % {filter_height} == {filter_height} - 1: to_mem = vec"
+            else:
+                code = f"if in_y % {filter_height} == {filter_height} - 1 and in_x % {filter_width} == {filter_width} - 1: to_mem = vec"
             to_memory_task = new_state.add_tasklet(
                 "to_memory_task",
                 inputs={"vec"},
                 outputs={"to_mem"},
-                code=f"if in_y % {filter_height} == {filter_height} - 1 and in_x % {filter_width} == {filter_width} - 1: to_mem = vec",
+                code=code,
             )
 
             new_state.add_memlet_path(
