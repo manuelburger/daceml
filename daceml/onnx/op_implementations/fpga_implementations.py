@@ -1361,7 +1361,6 @@ to_kernel = data""")
             # M and N
 
 
-
             map_entry, map_exit = state.add_map("read_B", {
                 "b": f"0:{batch_size}", # additional batch map to loop over images in batch
                 "n": f"0:ceiling({N}/{P})", # send whole image for every row tile (block of PEs)
