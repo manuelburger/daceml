@@ -2458,7 +2458,7 @@ class FPGAMaxPool2D(ONNXForward):
         element = f"(hy*{input_size_width * vec_width}+hx)"
         access = f"shift_register[{element}]"
         if xilinx:
-            access = f"shift_register[(in_y * {(input_size_width * vec_width)} + (in_x * {vec_width}) + {element} + 1) % {shift_register_size}]"
+            access = f"shift_register[(in_y * {(input_size_width * vec_width)} + (in_x * {vec_width} + w + 1) + {element}) % {shift_register_size}]"
         new_state.add_memlet_path(shift_register,
                                   inner_me,
                                   compute_tasklet,
@@ -2536,7 +2536,7 @@ class FPGAMaxPool2D(ONNXForward):
                 code = f"if in_y % {filter_height} == {filter_height} - 1 and in_x % {filter_width} == {filter_width} - 1: to_mem = vec"
             to_memory_task = new_state.add_tasklet(
                 "to_memory_task",
-                inputs={"vec"},
+                inputs={"vec": dace.vector(X.dtype.base_type, out_vec_width)},
                 outputs={"to_mem"},
                 code=code,
             )
