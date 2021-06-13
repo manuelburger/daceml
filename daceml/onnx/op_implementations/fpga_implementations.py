@@ -1742,10 +1742,59 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
             # Receives the results and adds it to C
             # i.e. receives results, adds Bias input B and outputs into Y
 
+            vendor = dace.config.Config.get("compiler", "fpga_vendor")
+            xilinx = (vendor == "xilinx")
+
+
             pipe = state.add_read("C_pipe")
             if add_bias:
                 mem_read = state.add_read("B")
             mem = state.add_write("Y")
+
+            # Because compilers, I don't know
+            # ----------------------------------------
+            # Bias Buffering
+            # ----------------------------------------
+            if xilinx:
+                new_sdfg.add_array(
+                    "bias_buffer", [num_channels],
+                    dtype=base_type,
+                    transient=True,
+                    storage=dace.dtypes.StorageType.FPGA_Local
+                )
+
+                bias_buffer = state.add_access("bias_buffer")
+
+                bias_read_task = state.add_tasklet(
+                    "read_bias_task",
+                    {"mem"},
+                    {"buf"},
+                    f"buf = mem"
+                )
+
+                bias_map_entry, bias_map_exit = state.add_map(
+                    "read_bias_map",
+                    {"b_i": f"0:{num_channels}"}, # always read two vectors
+                    schedule=dace.ScheduleType.FPGA_Device
+                )
+
+                state.add_memlet_path(
+                    mem_read,
+                    bias_map_entry,
+                    bias_read_task,
+                    dst_conn="mem",
+                    memlet=dace.Memlet("B[b_i]")
+                )
+
+                state.add_memlet_path(
+                    bias_read_task,
+                    bias_map_exit,
+                    bias_buffer,
+                    src_conn="buf",
+                    memlet=dace.Memlet("bias_buffer[b_i]")
+                )
+
+
 
             entry_map, exit_map = state.add_map(
                 "write_C", {
@@ -1759,20 +1808,6 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
                 schedule=dace.ScheduleType.FPGA_Device)
 
             # Output vectors
-            # vec_width = Y.dtype.veclen
-            # read_map_entry, read_map_exit = state.add_map(
-            #     "unrolled_reads_PEs", {"x1": "0:{}".format(vec_width)},
-            #     schedule=dace.ScheduleType.FPGA_Device,
-            #     unroll=True)
-
-            # local storage to accumulate data
-            # new_sdfg.add_array('vec_buf',
-            #                shape=[vec_width],
-            #                dtype=Y.dtype.base_type,
-            #                transient=True,
-            #                storage=dace.dtypes.StorageType.FPGA_Registers)
-            # vec_buf = state.add_access("vec_buf")
-
             # write in memory by adding C when we copy that to memory
             # deal with out-of-bound accesses
             if add_bias:
@@ -1813,13 +1848,15 @@ if tm * {T} + m * {vec_width} < {M}  and  n0 * {P} + n1 < {N} :
             # print("Access:", access)
 
             if add_bias:
-                state.add_memlet_path(mem_read,
+                bias_read = bias_buffer if xilinx else mem_read
+                bias_access = f"bias_buffer[{out_filter}]" if xilinx else f"B[{out_filter}]"
+                state.add_memlet_path(bias_read,
                                     entry_map,
                                     # read_map_entry, # output vectors
                                     tasklet,
                                     dst_conn="prev_c",
                                     memlet=dace.Memlet(
-                                        f"B[{out_filter}]", # single Bias value per filter
+                                        bias_access, # single Bias value per filter
                                         dynamic=True,
                                         allow_oob=True))
 
