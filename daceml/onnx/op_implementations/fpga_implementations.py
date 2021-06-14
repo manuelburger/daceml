@@ -1311,6 +1311,16 @@ to_kernel = data""")
             img_buffer_read = state.add_read("img_buffer")
 
 
+            new_sdfg.add_array("img_buffer2", [buffer_size // vec_width_in],
+                        dtype=vec_type,
+                        transient=True,
+                        storage=dace.dtypes.StorageType.FPGA_Local)
+
+            # img_buffer = state.add_access("img_buffer")
+            img_buffer2_write = state.add_write("img_buffer2")
+            img_buffer2_read = state.add_read("img_buffer2")
+
+
             # local vector buffer to hold vector data from global memory
             new_sdfg.add_array("vec_buf_B",
                            shape=[1],
@@ -1523,15 +1533,17 @@ if {load_test} and {padding_test_y_cpp_load}:
             copy_to_local_task = state.add_tasklet(
                 "move_to_local",
                 {"buf"},
-                {"load_write", "dummy_con"}, # , "dummy_connection"},
+                {"load_write", "load_write2", "dummy_con"}, # , "dummy_connection"},
 f"""
 # only write if within bounds
 # load cycle, fill buffer
 if {load_test}:
     if {padding_test_y_cpp_load}:
         load_write = buf
+        load_write2 = buf
     else:
         load_write = 0
+        load_write2 = 0
 """
             )
 
@@ -1556,12 +1568,23 @@ if {load_test}:
             # Store in buffer, load cycle
             state.add_memlet_path(
                 copy_to_local_task,
-                # vector_map_exit,
                 map_exit,
                 img_buffer_write, # use iteration global write buffer
                 src_conn="load_write",
                 memlet=dace.Memlet(
                     f"img_buffer[m0]",
+                    dynamic=True,
+                )
+            )
+
+            # Store in duplicate buffer, load cycle
+            state.add_memlet_path(
+                copy_to_local_task,
+                map_exit,
+                img_buffer2_write, # use iteration global write buffer
+                src_conn="load_write2",
+                memlet=dace.Memlet(
+                    f"img_buffer2[m0]",
                     dynamic=True,
                 )
             )
@@ -1581,9 +1604,14 @@ if {load_test}:
             # ----------------------------------------
             buffer_read_task = state.add_tasklet(
                 "move_to_local",
-                {"buf"},
+                {"buf", "buf2"},
                 {"vector" : dace.vector(base_type, vec_width_in)},
-                f"vector = buf"
+                f"""
+if m1 == 0:
+    vector = buf
+else:
+    vector = buf2
+                """
             )
 
             vector_map_entry, vector_map_exit = state.add_map(
@@ -1601,7 +1629,21 @@ if {load_test}:
                 buffer_read_task,
                 dst_conn="buf",
                 memlet=dace.Memlet(
-                    f"img_buffer[min({buffer_size // vec_width_in} - 1, int_floor({store_local_index_img}, {vec_width_in}) + m1)]",
+                    f"img_buffer[min({buffer_size // vec_width_in} - 1, int_floor({store_local_index_img}, {vec_width_in}) + 0)]",
+                    dynamic=True
+                )
+            )
+
+            # Read from second buffer
+            state.add_memlet_path(
+                img_buffer2_read,
+                map_entry,
+                vector_map_entry,
+                buffer_read_task,
+                dst_conn="buf2",
+                memlet=dace.Memlet(
+                    f"img_buffer2[min({buffer_size // vec_width_in} - 1, int_floor({store_local_index_img}, {vec_width_in}) + 1)]",
+                    dynamic=True
                 )
             )
 
@@ -1757,7 +1799,7 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
             # ----------------------------------------
             if xilinx:
                 new_sdfg.add_array(
-                    "bias_buffer", [num_channels],
+                    "bias_buffer", [num_filters],
                     dtype=base_type,
                     transient=True,
                     storage=dace.dtypes.StorageType.FPGA_Local
@@ -1774,7 +1816,7 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
 
                 bias_map_entry, bias_map_exit = state.add_map(
                     "read_bias_map",
-                    {"b_i": f"0:{num_channels}"}, # always read two vectors
+                    {"b_i": f"0:{num_filters}"}, # always read two vectors
                     schedule=dace.ScheduleType.FPGA_Device
                 )
 
