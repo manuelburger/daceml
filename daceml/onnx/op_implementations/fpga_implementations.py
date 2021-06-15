@@ -2685,6 +2685,7 @@ class FPGAGemm(ONNXForward):
         M_C = C.shape[0]
         M_Y = Y.shape[1]
         P = math.gcd(N, 16)  # Num PEs
+        print(f"[GEMM] N: {N}, using {P} PEs")
         vec_width = Y.veclen
 
         # Tile size, for the moment being the same as M_Y, the output size
