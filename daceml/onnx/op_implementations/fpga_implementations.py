@@ -1010,7 +1010,7 @@ class FPGAIm2ColConv_tiled(ONNXForward):
 
     @staticmethod
     def forward(node: ONNXOp, state: SDFGState,
-                sdfg: SDFG, tiles=256, pe=None) -> typing.Union[nodes.Node, SDFG]:
+                sdfg: SDFG, tiles=256, pe=None, activation=None) -> typing.Union[nodes.Node, SDFG]:
 
         X = in_desc_with_name(node, state, sdfg, "X")  # input image
         W = in_desc_with_name(node, state, sdfg, "W")  # weights/features
@@ -1857,6 +1857,14 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
             else:
                 add_prev_c = ""
 
+            pre_activation = f"from_kernel{add_prev_c}"
+            if activation is not None and activation == "relu":
+                print("[CONV] fused relu activation")
+                tasklet_code = f"to_memory = max(0.0, {pre_activation})"
+            else:
+                print("[CONV] no activation")
+                tasklet_code = f"to_memory = {pre_activation}"
+
             tasklet_inputs = {"from_kernel", "prev_c"
                             } if add_bias else {"from_kernel"}
 #             tasklet = state.add_tasklet(
@@ -1869,7 +1877,7 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
             tasklet = state.add_tasklet(
                 "write_C", tasklet_inputs, {"to_memory"}, f"""\
 if tm * {T} + m * {vec_width} < {M}  and  n0 * {P} + n1 < {N} :                                               
-    to_memory = from_kernel{add_prev_c}
+    {tasklet_code}
 """)
 
             state.add_memlet_path(pipe,
