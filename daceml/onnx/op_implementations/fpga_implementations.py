@@ -1859,14 +1859,33 @@ if (not ({load_test})) and (m0 < {T}/{vec_width}):
 
             pre_activation = f"from_kernel{add_prev_c}"
             if activation is not None and activation == "relu":
+
+                # If we are out-of bound, use a dummy value
+                new_sdfg.add_array("relu_zero",
+                                dtype=vec_type,
+                                shape=[1],
+                                transient=True,
+                                storage=dace.dtypes.StorageType.FPGA_Registers)
+                relu_zero = state.add_access("relu_zero")
+
+                init_tasklet = state.add_tasklet("init_zero", {}, {"init_dummy"}, """init_dummy = 0""")
+
+                state.add_memlet_path(init_tasklet,
+                                    relu_zero,
+                                    src_conn="init_dummy",
+                                    memlet=dace.Memlet("relu_zero[0]"))
+
                 print("[CONV] fused relu activation")
-                tasklet_code = f"to_memory = max(0.0, {pre_activation})"
+
+                tasklet_code = f"to_memory = max(zero, {pre_activation})"
             else:
                 print("[CONV] no activation")
                 tasklet_code = f"to_memory = {pre_activation}"
 
-            tasklet_inputs = {"from_kernel", "prev_c"
-                            } if add_bias else {"from_kernel"}
+            tasklet_inputs = {"from_kernel", "prev_c"} if add_bias else {"from_kernel"}
+            if activation is not None and activation == "relu":
+                tasklet_inputs.add("zero")
+                
 #             tasklet = state.add_tasklet(
 #                 "write_C", tasklet_inputs, {"to_memory"}, f"""\
 # if tm * {T} + m  < {M}  and  n0 * {P} + n1 < {N} :                                               
@@ -1896,6 +1915,17 @@ if tm * {T} + m * {vec_width} < {M}  and  n0 * {P} + n1 < {N} :
 
             access = f"[b, {out_filter}, {out_y}, {out_x}]"
             # print("Access:", access)
+
+
+            if activation is not None and activation == "relu":
+
+                state.add_memlet_path(
+                    relu_zero,
+                    entry_map,
+                    tasklet,
+                    dst_conn="zero",
+                    memlet=dace.Memlet("relu_zero[0]")
+                )
 
             if add_bias:
                 bias_read = bias_buffer if xilinx else mem_read
